@@ -28,6 +28,17 @@ class HpackInt(TestData):
     def decode_value(self, decoder):
         return decoder.read_hpack_int()
 
+class HuffChar(TestData):
+    def __init__(self, data):
+        # convert strings to a sequence of bytes
+        super(HuffChar, self).__init__(*list(data))
+
+    def encode_value(self, encoder, arg):
+        encoder.write_huffman_char(arg)
+
+    def decode_value(self, decoder):
+        return decoder.read_huffman_char()
+
 test_data = [
     ('1-bit', [Bits(1)], [0b10000000], False),
     ('5-bits', [Bits(1, 0, 1, 1, 0)], [0b10110000], False),
@@ -63,6 +74,10 @@ test_data = [
     ('3-byte-rollover', [HpackInt(382)], [0b11111111, 0b01111111], True),
     ('3-byte-rollover2', [HpackInt(383)], [0b11111111, 0b10000000, 0b00000001],
      True),
+
+    # Individual huffman-encoded characters
+    ('huff1', [HuffChar(b'a')], [0b00011000], False),
+    ('huff2', [HuffChar(b'Hi')], [0b11000110, 0b01100000], False),
     ]
 
 class BitEncodingTest(unittest.TestCase):
