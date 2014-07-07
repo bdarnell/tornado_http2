@@ -18,4 +18,10 @@ setup(
     name='tornado_http2',
     version=version,
     packages=['tornado_http2', 'tornado_http2.test'],
+    package_data={
+        'tornado_http2': [
+            'hpack_static_table.txt',
+            'hpack_huffman_data.txt',
+        ],
+    },
     **kwargs)

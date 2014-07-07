@@ -9,17 +9,17 @@ test_data = [
     ('D.2.1',
      '400a 6375 7374 6f6d 2d6b 6579 0d63 7573'
      '746f 6d2d 6865 6164 6572',
-     {b'custom-key': b'custom-header'}),
+     [(b'custom-key', b'custom-header')]),
     ('D.2.2',
      '040c 2f73 616d 706c 652f 7061 7468',
-     {b':path': b'/sample/path'}),
+     [(b':path', b'/sample/path')]),
     ('D.2.3',
      '1008 7061 7373 776f 7264 0673 6563 7265'
      '74',
-     {b'password': b'secret'}),
+     [(b'password', b'secret')]),
     ('D.2.4',
      '82',
-     {b':method': b'GET'}),
+     [(b':method', b'GET')]),
     # TODO: test header table after decoding; add D.2.5 test
 ]
 

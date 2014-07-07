@@ -5,19 +5,17 @@ from .encoding import BitDecoder
 
 class HpackDecoder(object):
     def decode(self, data):
-        header_set = {}
+        header_set = []
         bit_decoder = BitDecoder(data)
         while not bit_decoder.eod():
             is_indexed = bit_decoder.read_bit()
             if is_indexed:
                 idx = bit_decoder.read_hpack_int()
-                pair = _static_table[idx]
-                header_set[pair[0]] = pair[1]
+                header_set.append(_static_table[idx])
             else:
                 add_to_index = bit_decoder.read_bit()
                 if add_to_index:
-                    name, value = self.read_name_value_pair(bit_decoder)
-                    header_set[name] = value
+                    header_set.append(self.read_name_value_pair(bit_decoder))
                 else:
                     is_context_update = bit_decoder.read_bit()
                     if is_context_update:
@@ -25,8 +23,7 @@ class HpackDecoder(object):
                     else:
                         # read the never-index bit and discard for now.
                         bit_decoder.read_bit()
-                        name, value = self.read_name_value_pair(bit_decoder)
-                        header_set[name] = value
+                        header_set.append(self.read_name_value_pair(bit_decoder))
         return header_set
 
     def read_name_value_pair(self, bit_decoder):
