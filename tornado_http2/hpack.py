@@ -4,6 +4,11 @@ from tornado.escape import utf8
 from .encoding import BitDecoder
 
 class HpackDecoder(object):
+    def __init__(self):
+        # Dummy entry 0 in header_table
+        self._header_table = [None]
+        self._header_table_size = 0
+
     def decode(self, data):
         header_set = []
         bit_decoder = BitDecoder(data)
@@ -11,11 +16,15 @@ class HpackDecoder(object):
             is_indexed = bit_decoder.read_bit()
             if is_indexed:
                 idx = bit_decoder.read_hpack_int()
-                header_set.append(_static_table[idx])
+                name, value = _static_table[idx]
+                header_set.append((name, value))
+                self.add_to_header_table(name, value)
             else:
                 add_to_index = bit_decoder.read_bit()
                 if add_to_index:
-                    header_set.append(self.read_name_value_pair(bit_decoder))
+                    name, value = self.read_name_value_pair(bit_decoder)
+                    header_set.append((name, value))
+                    self.add_to_header_table(name, value)
                 else:
                     is_context_update = bit_decoder.read_bit()
                     if is_context_update:
@@ -43,6 +52,10 @@ class HpackDecoder(object):
         else:
             read_char = bit_decoder.read_char
         return bytes(bytearray([read_char() for i in range(length)]))
+
+    def add_to_header_table(self, name, value):
+        self._header_table.append((name, value))
+        self._header_table_size += len(name) + len(value) + 32
 
 def _load_static_table():
     """Parses the hpack static table, which was copied from
