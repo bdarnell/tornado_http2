@@ -56,8 +56,11 @@ class BitDecoder(object):
         self._byte_offset = 0
         self._bit_offset = 0
 
+    def eod(self):
+        return self._byte_offset >= len(self._data)
+
     def read_bit(self):
-        if self._byte_offset >= len(self._data):
+        if self.eod():
             raise EODError()
         mask = 1 << (7 - self._bit_offset)
         bit = self._data[self._byte_offset] & mask
@@ -90,6 +93,12 @@ class BitDecoder(object):
         while isinstance(tree_node, dict):
             tree_node = tree_node[self.read_bit()]
         return tree_node
+
+    def read_char(self):
+        assert self._bit_offset == 0
+        ch = self._data[self._byte_offset]
+        self._byte_offset += 1
+        return ch
 
 def _tree():
     return defaultdict(_tree)
