@@ -106,7 +106,7 @@ def _load_static_table():
     """Parses the hpack static table, which was copied from
     http://http2.github.io/http2-spec/compression.html#static.table
     corresponding to
-    http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-08#appendix-B
+    http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-12#appendix-A
     """
     # start the table with a dummy entry 0
     table = [None]

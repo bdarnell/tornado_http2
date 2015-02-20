@@ -51,14 +51,14 @@ test_data = [
      [0b10110111, 0b01111111], True),
 
     # Test cases from
-    # http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-08#appendix-D.1
+    # http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-12#appendix-C.1
     # Encode 10 with a 5-bit prefix.
-    ('D.1.1', [Bits(1, 0, 1), HpackInt(10)], [0b10101010], True),
+    ('C.1.1', [Bits(1, 0, 1), HpackInt(10)], [0b10101010], True),
     # Encode 1337 with a 5-bit prefix.
-    ('D.1.2', [Bits(0, 1, 0), HpackInt(1337)],
+    ('C.1.2', [Bits(0, 1, 0), HpackInt(1337)],
      [0b01011111, 0b10011010, 0b00001010], True),
     # Encode 42 on a byte boundary.
-    ('D.1.3', [HpackInt(42)], [42], True),
+    ('C.1.3', [HpackInt(42)], [42], True),
 
     # Edge cases.
     # Rollover from 1 byte to 2.

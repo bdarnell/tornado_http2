@@ -23,7 +23,7 @@ class BitEncoder(object):
     def write_hpack_int(self, i):
         """Encodes an integer as defined by HPACK.
 
-        http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-08#section-6.1
+        http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-12#section-5.1
         """
         n = 8 - self._bit_offset
         if n == 0:
@@ -107,7 +107,7 @@ def _load_huffman_data():
     """Parses hpack_huffman_data, which was copied from
     http://http2.github.io/http2-spec/compression.html#huffman.code
     (corresponding to
-    http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-08#appendix-C )
+    http://tools.ietf.org/html/draft-ietf-httpbis-header-compression-12#appendix-B )
 
     Implements a very crude and inefficient huffman codec.
     """
