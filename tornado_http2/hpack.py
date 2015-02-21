@@ -31,6 +31,7 @@ class HpackDecoder(object):
                         new_limit = bit_decoder.read_hpack_int()
                         # TODO: fail if new_limit is higher than old limit.
                         self._dynamic_table_limit = new_limit
+                        self._gc_dynamic_table()
                     else:
                         # read the never-index bit and discard for now.
                         bit_decoder.read_bit()
@@ -71,9 +72,12 @@ class HpackDecoder(object):
     def add_to_dynamic_table(self, name, value):
         self._dynamic_table.appendleft((name, value))
         self._dynamic_table_size += len(name) + len(value) + 32
+        self._gc_dynamic_table()
+
+    def _gc_dynamic_table(self):
         while self._dynamic_table_size > self._dynamic_table_limit:
-            old_name, old_value = self._dynamic_table.pop()
-            self._dynamic_table_size -= len(old_name) + len(old_value) + 32
+            name, value = self._dynamic_table.pop()
+            self._dynamic_table_size -= len(name) + len(value) + 32
 
 def _load_static_table():
     """Parses the hpack static table, which was copied from
