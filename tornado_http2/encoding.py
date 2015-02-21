@@ -88,11 +88,24 @@ class BitDecoder(object):
                 break
         return i
 
-    def read_huffman_char(self):
+    def read_huffman_char(self, limit):
+        """Reads one huffman-encoded character from the stream.
+
+        Will not read past ``limit`` bytes. ``limit`` may be None to
+        use the entire decoder. Returns None for end-of-stream.
+        """
+        if limit is None:
+            limit = len(self._data)
         tree_node = _huffman_tree
-        while isinstance(tree_node, dict):
+        while self._byte_offset < limit:
             tree_node = tree_node[self.read_bit()]
-        return tree_node
+            if not isinstance(tree_node, dict):
+                return tree_node
+        # End-of-stream.
+        # TODO: it is an error to reach this point if we are not aligned
+        # at the end of a byte or if any of the bits read in this call were
+        # zero. Verify this.
+        return None
 
     def read_char(self):
         assert self._bit_offset == 0

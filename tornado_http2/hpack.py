@@ -59,15 +59,10 @@ class HpackDecoder(object):
             dest_byte = bit_decoder._byte_offset + length
             chars = []
             while bit_decoder._byte_offset < dest_byte:
-                try:
-                    chars.append(bit_decoder.read_huffman_char())
-                except EODError:
-                    # TODO: fix handling of EOS char.
+                char = bit_decoder.read_huffman_char(dest_byte)
+                if char is None:
                     break
-            while bit_decoder._bit_offset != 0:
-                pad_bit = bit_decoder.read_bit()
-                if not pad_bit:
-                    raise ValueError("padding bits must be 1")
+                chars.append(char)
         else:
             chars = [bit_decoder.read_char() for i in range(length)]
         return bytes(bytearray(chars))

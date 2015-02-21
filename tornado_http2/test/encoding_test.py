@@ -37,7 +37,7 @@ class HuffChar(TestData):
         encoder.write_huffman_char(arg)
 
     def decode_value(self, decoder):
-        return decoder.read_huffman_char()
+        return decoder.read_huffman_char(None)
 
 test_data = [
     ('1-bit', [Bits(1)], [0b10000000], False),

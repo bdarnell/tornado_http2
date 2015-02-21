@@ -72,16 +72,16 @@ test_data = [
         (b'cache-control', b'no-cache')],
        110, [(b'cache-control', b'no-cache'),
              (b':authority', b'www.example.com')]),
-      # ('8287 85bf 4088 25a8 49e9 5ba9 7d7f 8925'
-      #   'a849 e95b b8e8 b4bf',
-      #  [(b':method', b'GET'),
-      #   (b':scheme', b'https'),
-      #   (b':path', b'/index.html'),
-      #   (b':authority', b'www.example.com'),
-      #   (b'custom-key', b'custom-value')],
-      #  164, [(b'custom-key', b'custom-value'),
-      #        (b'cache-control', b'no-cache'),
-      #        (b':authority', b'www.example.com')]),
+       ('8287 85bf 4088 25a8 49e9 5ba9 7d7f 8925'
+         'a849 e95b b8e8 b4bf',
+        [(b':method', b'GET'),
+         (b':scheme', b'https'),
+         (b':path', b'/index.html'),
+         (b':authority', b'www.example.com'),
+         (b'custom-key', b'custom-value')],
+        164, [(b'custom-key', b'custom-value'),
+              (b'cache-control', b'no-cache'),
+              (b':authority', b'www.example.com')]),
      ]),
 ]
 
