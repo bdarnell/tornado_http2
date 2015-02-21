@@ -5,9 +5,10 @@ from tornado.escape import utf8
 from .encoding import BitDecoder, EODError
 
 class HpackDecoder(object):
-    def __init__(self):
+    def __init__(self, dynamic_table_limit):
         self._dynamic_table = collections.deque()
         self._dynamic_table_size = 0
+        self._dynamic_table_limit = dynamic_table_limit
 
     def decode(self, data):
         header_list = []
@@ -25,17 +26,11 @@ class HpackDecoder(object):
                     header_list.append((name, value))
                     self.add_to_dynamic_table(name, value)
                 else:
-                    is_context_update = bit_decoder.read_bit()
-                    if is_context_update:
-                        clear_ref_set = bit_decoder.read_bit()
+                    is_limit_update = bit_decoder.read_bit()
+                    if is_limit_update:
                         new_limit = bit_decoder.read_hpack_int()
-                        if clear_ref_set:
-                            if new_limit != 0:
-                                raise ValueError(
-                                    "bits after clear_ref_set must be zero")
-                            self._reference_set.clear()
-                        else:
-                            raise NotImplementedError()
+                        # TODO: fail if new_limit is higher than old limit.
+                        self._dynamic_table_limit = new_limit
                     else:
                         # read the never-index bit and discard for now.
                         bit_decoder.read_bit()
@@ -76,6 +71,9 @@ class HpackDecoder(object):
     def add_to_dynamic_table(self, name, value):
         self._dynamic_table.appendleft((name, value))
         self._dynamic_table_size += len(name) + len(value) + 32
+        while self._dynamic_table_size > self._dynamic_table_limit:
+            old_name, old_value = self._dynamic_table.pop()
+            self._dynamic_table_size -= len(old_name) + len(old_value) + 32
 
 def _load_static_table():
     """Parses the hpack static table, which was copied from
