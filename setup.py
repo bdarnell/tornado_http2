@@ -1,4 +1,4 @@
-from distutils.core import setup
+import sys
 
 try:
     import setuptools
@@ -13,6 +13,9 @@ kwargs = {}
 
 if setuptools is not None:
     kwargs['install_requires'] = ['tornado']
+
+    if sys.version_info < (3, 4):
+        kwargs['install_requires'].append('enum34')
 
 setup(
     name='tornado_http2',

@@ -1,0 +1,76 @@
+import binascii
+
+try:
+    import enum
+except ImportError:
+    import enum34 as enum
+
+# ALPN protocol identifiers:
+# https://tools.ietf.org/html/draft-ietf-httpbis-http2-17#section-11.1
+HTTP2_TLS = b"h2"
+HTTP2_CLEAR = b"h2c"
+
+# Defined in https://tools.ietf.org/html/draft-ietf-httpbis-http2-17#section-3.5
+CLIENT_PREFACE = binascii.a2b_hex("505249202a20485454502f322e300d0a0d0a534d0d0a0d0a")
+
+
+class FrameType(enum.Enum):
+    """Constants for HTTP2 frame types.
+
+    Defined in
+    https://tools.ietf.org/html/draft-ietf-httpbis-http2-17#section-11.2
+    """
+    DATA = 0x0
+    HEADERS = 0x1
+    PRIORITY = 0x2
+    RST_STREAM = 0x3
+    SETTINGS = 0x4
+    PUSH_PROMISE = 0x5
+    PING = 0x6
+    GOAWAY = 0x7
+    WINDOW_UPDATE = 0x8
+    CONTINUATION = 0x9
+
+
+class Setting(enum.Enum):
+    """Constants for HTTP2 setting fields.
+
+    Defined in
+    https://tools.ietf.org/html/draft-ietf-httpbis-http2-17#section-11.3
+    """
+    def __init__(self, code, default):
+        self.code = code
+        self.default = default
+
+    HEADER_TABLE_SIZE = (0x1, 4096)
+    ENABLE_PUSH = (0x2, 1)
+    MAX_CONCURRENT_STREAMS = (0x3, None)
+    INITIAL_WINDOW_SIZE = (0x4, 65535)
+    MAX_FRAME_SIZE = (0x5, 16384)
+    MAX_HEADER_LIST_SIZE = (0x6, None)
+
+
+class ErrorCode(enum.Enum):
+    """Constants for HTTP2 error codes.
+
+    Defined in
+    https://tools.ietf.org/html/draft-ietf-httpbis-http2-17#section-11.4
+    """
+    def __init__(self, code, description):
+        self.code = code
+        self.description = description
+
+    NO_ERROR = (0x0, "Graceful shutdown")
+    PROTOCOL_ERROR = (0x1, "Protocol error detected")
+    INTERNAL_ERROR = (0x2, "Implementation fault")
+    FLOW_CONTROL_ERROR = (0x3, "Flow control limits exceeded")
+    SETTINGS_TIMEOUT = (0x4, "Settings not acknowledged")
+    STREAM_CLOSED = (0x5, "Frame received for closed stream")
+    FRAME_SIZE_ERROR = (0x6, "Frame size incorrect")
+    REFUSED_STREAM = (0x7, "Stream not processed")
+    CANCEL = (0x8, "Stream cancelled")
+    COMPRESSION_ERROR = (0x9, "Compression state not updated")
+    CONNECT_ERROR = (0xa, "TCP connection error for CONNECT method")
+    ENHANCE_YOUR_CALM = (0xb, "Processing capacity  exceeded")
+    INADEQUATE_SECURITY = (0xc, "Negotiated TLS parameters not acceptable")
+    HTTP_1_1_REQUIRED = (0xd, "Use HTTP/1.1 for the request")
