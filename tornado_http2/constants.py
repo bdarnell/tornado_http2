@@ -82,3 +82,28 @@ class HeaderIndexMode(enum.Enum):
     YES = 1
     NO = 2
     NEVER = 3
+
+
+class StreamState(enum.Enum):
+    """States for an HTTP2 stream.
+    """
+    IDLE = 0
+    RESERVED_LOCAL = 1
+    RESERVED_REMOTE = 2
+    OPEN = 3
+    HALF_CLOSED_LOCAL = 4
+    HALF_CLOSED_REMOTE = 5
+    CLOSED = 6
+
+
+class FrameFlag(enum.IntEnum):
+    """HTTP2 frame-level flags.
+
+    Flags are combined with bitwise OR.
+    Note that the set of valid flags varies by frame type.
+    """
+    END_STREAM = 0x1  # DATA, HEADERS
+    ACK = 0x1  # SETTINGS, PING
+    END_HEADERS = 0x4  # HEADERS, PUSH_PROMISE, CONTINUATION
+    PADDED = 0x8  # DATA, HEADERS, PUSH_PROMISE
+    PRIORITY = 0x20  # HEADERS
