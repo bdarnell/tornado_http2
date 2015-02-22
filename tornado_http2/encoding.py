@@ -2,8 +2,10 @@ from collections import defaultdict
 import os
 import re
 
+
 class EODError(Exception):
     pass
+
 
 class BitEncoder(object):
     def __init__(self):
@@ -19,6 +21,10 @@ class BitEncoder(object):
             self._bit_offset = 0
         self._data[-1] |= b << (7 - self._bit_offset)
         self._bit_offset += 1
+
+    def write_bits(self, *bits):
+        for b in bits:
+            self.write_bit(b)
 
     def write_hpack_int(self, i):
         """Encodes an integer as defined by HPACK.
@@ -45,6 +51,17 @@ class BitEncoder(object):
         # TODO: optimize this.
         for b in _huffman_map[c]:
             self.write_bit(b)
+
+    def write_huffman_string(self, s):
+        for c in s:
+            self.write_huffman_char(c)
+        while self._bit_offset != 8:
+            self.write_bit(1)
+
+    def write_string(self, s):
+        assert self._bit_offset == 8
+        self._data += s
+
 
 class BitDecoder(object):
     def __init__(self, data):
@@ -113,8 +130,10 @@ class BitDecoder(object):
         self._byte_offset += 1
         return ch
 
+
 def _tree():
     return defaultdict(_tree)
+
 
 def _load_huffman_data():
     """Parses hpack_huffman_data, which was copied from

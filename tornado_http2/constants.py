@@ -74,3 +74,11 @@ class ErrorCode(enum.Enum):
     ENHANCE_YOUR_CALM = (0xb, "Processing capacity  exceeded")
     INADEQUATE_SECURITY = (0xc, "Negotiated TLS parameters not acceptable")
     HTTP_1_1_REQUIRED = (0xd, "Use HTTP/1.1 for the request")
+
+
+class HeaderIndexMode(enum.Enum):
+    """Flags for the HPACK encoder.
+    """
+    YES = 1
+    NO = 2
+    NEVER = 3
