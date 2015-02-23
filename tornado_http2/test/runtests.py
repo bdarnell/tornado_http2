@@ -2,6 +2,7 @@ import unittest
 import tornado.testing
 
 TEST_MODULES = [
+    'tornado_http2.test.connection_test',
     'tornado_http2.test.encoding_test',
     'tornado_http2.test.hpack_test',
 ]
