@@ -4,8 +4,9 @@ import struct
 
 from tornado.escape import native_str, utf8
 from tornado import gen
-from tornado.httputil import HTTPHeaders, RequestStartLine
+from tornado.httputil import HTTPHeaders, RequestStartLine, ResponseStartLine
 from tornado.ioloop import IOLoop
+from tornado.iostream import StreamClosedError
 
 from . import constants
 from .hpack import HpackDecoder, HpackEncoder
@@ -28,6 +29,7 @@ class Connection(object):
         self.context = context
 
         self.streams = {}
+        self.next_stream_id = 1 if is_client else 2
         self.hpack_decoder = HpackDecoder(
             constants.Setting.HEADER_TABLE_SIZE.default)
         self.hpack_encoder = HpackEncoder(
@@ -37,6 +39,12 @@ class Connection(object):
         fut = self._conn_loop(delegate)
         IOLoop.current().add_future(fut, lambda f: f.result())
         return fut
+
+    def create_stream(self, delegate):
+        stream = Stream(self, self.next_stream_id, delegate)
+        self.next_stream_id += 2
+        self.streams[stream.stream_id] = stream
+        return stream
 
     @gen.coroutine
     def _conn_loop(self, delegate):
@@ -55,17 +63,20 @@ class Connection(object):
                 logging.warning('got frame %r', frame)
                 if frame.stream_id == 0:
                     self.handle_frame(frame)
-                elif frame.type == constants.FrameType.HEADERS:
+                elif (not self.is_client and
+                      frame.type == constants.FrameType.HEADERS):
                     if frame.stream_id in self.streams:
                         raise Exception("already have stream %d",
                                         frame.stream_id)
-                    stream = Stream(self, frame.stream_id, delegate)
+                    stream = Stream(self, frame.stream_id, None)
+                    stream.delegate = delegate.start_request(self, stream)
                     self.streams[frame.stream_id] = stream
                     stream.handle_frame(frame)
                 else:
                     self.streams[frame.stream_id].handle_frame(frame)
+        except StreamClosedError:
+            return
         except:
-            print('error')
             self.stream.close()
             raise
 
@@ -79,6 +90,7 @@ class Connection(object):
             raise Exception("invalid frame type %s for stream 0", frame.type)
 
     def _write_frame(self, frame):
+        logging.warning('sending frame %r', frame)
         # The frame header starts with a 24-bit length. Since `struct`
         # doesn't support 24-bit ints, encode as 32 and slice off the first
         # byte.
@@ -120,16 +132,18 @@ class Connection(object):
 
 
 class Stream(object):
-    def __init__(self, conn, stream_id, server_delegate):
+    def __init__(self, conn, stream_id, delegate):
         self.conn = conn
         self.stream_id = stream_id
-        self.delegate = server_delegate.start_request(conn, self)
+        self.delegate = delegate
 
     def handle_frame(self, frame):
         if frame.type == constants.FrameType.HEADERS:
             self._handle_headers_frame(frame)
+        elif frame.type == constants.FrameType.DATA:
+            self._handle_data_frame(frame)
         elif frame.type == constants.FrameType.RST_STREAM:
-            pass # TODO: RST_STREAM
+            pass  # TODO: RST_STREAM
         else:
             raise Exception("invalid frame type %s", frame.type)
 
@@ -147,10 +161,19 @@ class Stream(object):
                 pseudo_headers[native_str(k)] = native_str(v)
             else:
                 headers[native_str(k)] = native_str(v)
-        self.delegate.headers_received(
-            RequestStartLine(pseudo_headers[':method'],
-                             pseudo_headers[':path'], 'HTTP/2.0'),
-            headers)
+        if self.conn.is_client:
+            start_line = ResponseStartLine('HTTP/2.0',
+                                           int(pseudo_headers[':status']), '')
+        else:
+            start_line = RequestStartLine(pseudo_headers[':method'],
+                                          pseudo_headers[':path'], 'HTTP/2.0'),
+
+        self.delegate.headers_received(start_line, headers)
+        if frame.flags & constants.FrameFlag.END_STREAM:
+            self.delegate.finish()
+
+    def _handle_data_frame(self, frame):
+        self.delegate.data_received(frame.data)
         if frame.flags & constants.FrameFlag.END_STREAM:
             self.delegate.finish()
 
@@ -159,8 +182,17 @@ class Stream(object):
         pass
 
     def write_headers(self, start_line, headers, chunk=None, callback=None):
-        header_list = [(b':status', utf8(str(start_line.code)),
-                        constants.HeaderIndexMode.YES)]
+        header_list = []
+        if self.conn.is_client:
+            header_list.append((b':method', utf8(start_line.method),
+                                constants.HeaderIndexMode.YES))
+            header_list.append((b':scheme', b'https',
+                                constants.HeaderIndexMode.YES))
+            header_list.append((b':path', utf8(start_line.path),
+                                constants.HeaderIndexMode.NO))
+        else:
+            header_list.append((b':status', utf8(str(start_line.code)),
+                                constants.HeaderIndexMode.YES))
         for k, v in headers.get_all():
             header_list.append((utf8(k.lower()), utf8(v),
                                 constants.HeaderIndexMode.YES))
