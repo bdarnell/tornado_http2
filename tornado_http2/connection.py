@@ -60,7 +60,7 @@ class Connection(object):
             self._write_frame(self._settings_frame())
             while True:
                 frame = yield self._read_frame()
-                logging.warning('got frame %r', frame)
+                logging.debug('got frame %r', frame)
                 if frame.stream_id == 0:
                     self.handle_frame(frame)
                 elif (not self.is_client and
@@ -90,7 +90,7 @@ class Connection(object):
             raise Exception("invalid frame type %s for stream 0", frame.type)
 
     def _write_frame(self, frame):
-        logging.warning('sending frame %r', frame)
+        logging.debug('sending frame %r', frame)
         # The frame header starts with a 24-bit length. Since `struct`
         # doesn't support 24-bit ints, encode as 32 and slice off the first
         # byte.
@@ -166,7 +166,7 @@ class Stream(object):
                                            int(pseudo_headers[':status']), '')
         else:
             start_line = RequestStartLine(pseudo_headers[':method'],
-                                          pseudo_headers[':path'], 'HTTP/2.0'),
+                                          pseudo_headers[':path'], 'HTTP/2.0')
 
         self.delegate.headers_received(start_line, headers)
         if frame.flags & constants.FrameFlag.END_STREAM:

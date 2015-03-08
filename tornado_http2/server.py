@@ -1,35 +1,37 @@
-import logging
-import ssl
+import functools
 
-from tornado import gen
-from tornado.httpserver import _ServerRequestAdapter
-from tornado.tcpserver import TCPServer
+from tornado.httpserver import HTTPServer
+from tornado.iostream import SSLIOStream
+from tornado.netutil import ssl_options_to_context
 
 from tornado_http2.connection import Connection
 from tornado_http2 import constants
 
 
-class Server(TCPServer):
-    def __init__(self, request_callback, ssl_options=None):
-        if ssl_options is None:
-            ssl_options = ssl.create_default_context()
-        ssl_options.set_npn_protocols(['h2-14', 'h2'])
-        super(Server, self).__init__(ssl_options=ssl_options)
-        self.request_callback = request_callback
+class Server(HTTPServer):
+    def initialize(self, request_callback, ssl_options=None, **kwargs):
+        if ssl_options is not None:
+            if isinstance(ssl_options, dict):
+                if 'certfile' not in ssl_options:
+                    raise KeyError('missing key "certfile" in ssl_options')
+                ssl_options = ssl_options_to_context(ssl_options)
+            ssl_options.set_npn_protocols([constants.HTTP2_TLS])
+        super(Server, self).initialize(
+            request_callback, ssl_options=ssl_options, **kwargs)
 
-        self.xheaders = False
-
-    @gen.coroutine
     def handle_stream(self, stream, address):
-        logging.info('handling stream %r %r', stream, address)
-        yield stream.wait_for_handshake()
-        # TODO: alpn when available
-        proto = stream.socket.selected_npn_protocol()
-        if proto == constants.HTTP2_TLS:
-            conn = Connection(stream, False)
-            conn.start(self)
+        if isinstance(stream, SSLIOStream):
+            stream.wait_for_handshake(
+                functools.partial(self._handle_handshake, stream, address))
         else:
-            raise Exception("fallback to http1: %s" % proto)
+            self._handle_handshake(stream, address)
 
-    def start_request(self, server_conn, request_conn):
-        return _ServerRequestAdapter(self, server_conn, request_conn)
+    def _handle_handshake(self, stream, address):
+        if isinstance(stream, SSLIOStream):
+            # TODO: alpn when available
+            proto = stream.socket.selected_npn_protocol()
+            if proto == constants.HTTP2_TLS:
+                conn = Connection(stream, False)
+                conn.start(self)
+                return
+        super(Server, self).handle_stream(stream, address)
