@@ -7,8 +7,8 @@ except ImportError:
 
 # ALPN protocol identifiers:
 # https://tools.ietf.org/html/draft-ietf-httpbis-http2-17#section-11.1
-HTTP2_TLS = b"h2"
-HTTP2_CLEAR = b"h2c"
+HTTP2_TLS = "h2-14"
+HTTP2_CLEAR = "h2c-14"
 
 # Defined in https://tools.ietf.org/html/draft-ietf-httpbis-http2-17#section-3.5
 CLIENT_PREFACE = binascii.a2b_hex("505249202a20485454502f322e300d0a0d0a534d0d0a0d0a")
