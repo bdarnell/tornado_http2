@@ -2,6 +2,7 @@ import collections
 import logging
 import struct
 
+from tornado.concurrent import Future
 from tornado.escape import native_str, utf8
 from tornado import gen
 from tornado.httputil import HTTPHeaders, RequestStartLine, ResponseStartLine
@@ -136,6 +137,7 @@ class Stream(object):
         self.conn = conn
         self.stream_id = stream_id
         self.delegate = delegate
+        self.finish_future = Future()
 
     def handle_frame(self, frame):
         if frame.type == constants.FrameType.HEADERS:
@@ -171,11 +173,13 @@ class Stream(object):
         self.delegate.headers_received(start_line, headers)
         if frame.flags & constants.FrameFlag.END_STREAM:
             self.delegate.finish()
+            self.finish_future.set_result(None)
 
     def _handle_data_frame(self, frame):
         self.delegate.data_received(frame.data)
         if frame.flags & constants.FrameFlag.END_STREAM:
             self.delegate.finish()
+            self.finish_future.set_result(None)
 
     def set_close_callback(self, callback):
         # TODO: this shouldn't be necessary
@@ -210,3 +214,7 @@ class Stream(object):
         self.conn._write_frame(Frame(constants.FrameType.DATA,
                                      constants.FrameFlag.END_STREAM,
                                      self.stream_id, b''))
+
+    def read_response(self, delegate):
+        assert delegate is self.delegate
+        return self.finish_future
