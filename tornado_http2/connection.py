@@ -42,7 +42,8 @@ class Connection(object):
         return fut
 
     def create_stream(self, delegate):
-        stream = Stream(self, self.next_stream_id, delegate)
+        stream = Stream(self, self.next_stream_id, delegate,
+                        context=self.context)
         self.next_stream_id += 2
         self.streams[stream.stream_id] = stream
         return stream
@@ -69,13 +70,18 @@ class Connection(object):
                     if frame.stream_id in self.streams:
                         raise Exception("already have stream %d",
                                         frame.stream_id)
-                    stream = Stream(self, frame.stream_id, None)
+                    stream = Stream(self, frame.stream_id, None,
+                                    context=self.context)
                     stream.delegate = delegate.start_request(self, stream)
                     self.streams[frame.stream_id] = stream
                     stream.handle_frame(frame)
                 else:
                     self.streams[frame.stream_id].handle_frame(frame)
         except StreamClosedError:
+            return
+        except GeneratorExit:
+            # The generator is being garbage collected; don't close the
+            # stream because the IOLoop is going away too.
             return
         except:
             self.stream.close()
@@ -133,10 +139,11 @@ class Connection(object):
 
 
 class Stream(object):
-    def __init__(self, conn, stream_id, delegate):
+    def __init__(self, conn, stream_id, delegate, context=None):
         self.conn = conn
         self.stream_id = stream_id
         self.delegate = delegate
+        self.context = context
         self.finish_future = Future()
 
     def handle_frame(self, frame):
@@ -158,7 +165,7 @@ class Stream(object):
             data = data[5:]
         pseudo_headers = {}
         headers = HTTPHeaders()
-        for k, v, idx in self.conn.hpack_decoder.decode(data):
+        for k, v, idx in self.conn.hpack_decoder.decode(bytearray(data)):
             if k.startswith(b':'):
                 pseudo_headers[native_str(k)] = native_str(v)
             else:
@@ -200,15 +207,18 @@ class Stream(object):
         for k, v in headers.get_all():
             header_list.append((utf8(k.lower()), utf8(v),
                                 constants.HeaderIndexMode.YES))
-        data = self.conn.hpack_encoder.encode(header_list)
+        data = bytes(self.conn.hpack_encoder.encode(header_list))
         frame = Frame(constants.FrameType.HEADERS,
                       constants.FrameFlag.END_HEADERS, self.stream_id,
                       data)
         self.conn._write_frame(frame)
 
+        self.write(chunk)
+
+    def write(self, chunk):
         if chunk:
             self.conn._write_frame(Frame(constants.FrameType.DATA, 0,
-                                        self.stream_id, chunk))
+                                         self.stream_id, chunk))
 
     def finish(self):
         self.conn._write_frame(Frame(constants.FrameType.DATA,
@@ -216,5 +226,5 @@ class Stream(object):
                                      self.stream_id, b''))
 
     def read_response(self, delegate):
-        assert delegate is self.delegate
+        assert delegate is self.delegate, 'cannot change delegate'
         return self.finish_future

@@ -59,7 +59,7 @@ class BitEncoder(object):
             self.write_bit(1)
 
     def write_string(self, s):
-        assert self._bit_offset == 8
+        assert self._bit_offset == 8, 'not byte-aligned'
         self._data += s
 
 
@@ -125,7 +125,7 @@ class BitDecoder(object):
         return None
 
     def read_char(self):
-        assert self._bit_offset == 0
+        assert self._bit_offset == 0, 'not byte-aligned'
         ch = self._data[self._byte_offset]
         self._byte_offset += 1
         return ch

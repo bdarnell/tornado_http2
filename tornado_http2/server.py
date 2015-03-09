@@ -1,6 +1,6 @@
 import functools
 
-from tornado.httpserver import HTTPServer
+from tornado.httpserver import HTTPServer, _HTTPRequestContext
 from tornado.iostream import SSLIOStream
 from tornado.netutil import ssl_options_to_context
 
@@ -28,10 +28,12 @@ class Server(HTTPServer):
 
     def _handle_handshake(self, stream, address):
         if isinstance(stream, SSLIOStream):
+            assert stream.socket.cipher(), 'handshake incomplete'
             # TODO: alpn when available
             proto = stream.socket.selected_npn_protocol()
             if proto == constants.HTTP2_TLS:
-                conn = Connection(stream, False)
+                context = _HTTPRequestContext(stream, address, self.protocol)
+                conn = Connection(stream, False, context=context)
                 conn.start(self)
                 return
         super(Server, self).handle_stream(stream, address)

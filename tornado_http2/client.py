@@ -29,6 +29,7 @@ class Client(SimpleAsyncHTTPClient):
     def _connection_class(self):
         return _HTTP2ClientConnection
 
+
 class _HTTP2ClientConnection(_HTTPConnection):
     def _get_ssl_options(self, scheme):
         options = super(_HTTP2ClientConnection, self)._get_ssl_options(scheme)
@@ -40,6 +41,7 @@ class _HTTP2ClientConnection(_HTTPConnection):
 
     def _create_connection(self, stream):
         if isinstance(stream, SSLIOStream):
+            assert stream.socket.cipher() is not None, 'handshake incomplete'
             proto = stream.socket.selected_npn_protocol()
             if proto == constants.HTTP2_TLS:
                 conn = Connection(stream, True)
