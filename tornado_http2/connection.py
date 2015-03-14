@@ -6,7 +6,7 @@ from tornado.concurrent import Future
 from tornado.escape import native_str, utf8
 from tornado import gen
 from tornado.http1connection import _GzipMessageDelegate
-from tornado.httputil import HTTPHeaders, RequestStartLine, ResponseStartLine, responses
+from tornado.httputil import HTTPHeaders, RequestStartLine, ResponseStartLine, responses, HTTPOutputError
 from tornado.ioloop import IOLoop
 from tornado.iostream import StreamClosedError
 from tornado.log import gen_log
@@ -143,6 +143,17 @@ class Connection(object):
             self._write_frame(self._settings_ack_frame())
 
 
+def _reset_on_error(f):
+    def wrapper(self, *args, **kw):
+        try:
+            return f(self, *args, **kw)
+        except Exception:
+            self.conn._write_frame(Frame(constants.FrameType.RST_STREAM,
+                                         0, self.stream_id, b'\x00\x00\x00\x00'))
+            raise
+    return wrapper
+
+
 class Stream(object):
     def __init__(self, conn, stream_id, delegate, context=None):
         self.conn = conn
@@ -153,12 +164,13 @@ class Stream(object):
         from tornado.util import ObjectDict
         # TODO: remove
         self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close)
+        self._expected_content_remaining = None
+        self._need_delegate_close = False
 
     def set_delegate(self, delegate):
         self.orig_delegate = self.delegate = delegate
         if self.conn.params.decompress:
             self.delegate = _GzipMessageDelegate(delegate, self.conn.params.chunk_size)
-
 
     def handle_frame(self, frame):
         if frame.type == constants.FrameType.HEADERS:
@@ -166,7 +178,7 @@ class Stream(object):
         elif frame.type == constants.FrameType.DATA:
             self._handle_data_frame(frame)
         elif frame.type == constants.FrameType.RST_STREAM:
-            pass  # TODO: RST_STREAM
+            self._handle_rst_stream_frame(frame)
         else:
             raise Exception("invalid frame type %s", frame.type)
 
@@ -194,7 +206,9 @@ class Stream(object):
         else:
             start_line = RequestStartLine(pseudo_headers[':method'],
                                           pseudo_headers[':path'], 'HTTP/2.0')
+        self._request_start_line = start_line
 
+        self._need_delegate_close = True
         self.delegate.headers_received(start_line, headers)
         if frame.flags & constants.FrameFlag.END_STREAM:
             self.delegate.finish()
@@ -203,14 +217,26 @@ class Stream(object):
     def _handle_data_frame(self, frame):
         self.delegate.data_received(frame.data)
         if frame.flags & constants.FrameFlag.END_STREAM:
+            self._need_delegate_close = False
             self.delegate.finish()
             self.finish_future.set_result(None)
+
+    def _handle_rst_stream_frame(self, frame):
+        if self._need_delegate_close:
+            delegate.on_connection_close()
 
     def set_close_callback(self, callback):
         # TODO: this shouldn't be necessary
         pass
 
+    @_reset_on_error
     def write_headers(self, start_line, headers, chunk=None, callback=None):
+        if (not self.conn.is_client and
+            (self._request_start_line.method == 'HEAD' or
+             start_line.code == 304)):
+            self._expected_content_remaining = 0
+        elif 'Content-Length' in headers:
+            self._expected_content_remaining = int(headers['Content-Length'])
         header_list = []
         if self.conn.is_client:
             header_list.append((b':method', utf8(start_line.method),
@@ -233,14 +259,26 @@ class Stream(object):
 
         self.write(chunk, callback=callback)
 
+    @_reset_on_error
     def write(self, chunk, callback=None):
         if chunk:
+            if self._expected_content_remaining is not None:
+                self._expected_content_remaining -= len(chunk)
+                if self._expected_content_remaining < 0:
+                    raise HTTPOutputError(
+                        "Tried to write more data than Content-Length")
             self.conn._write_frame(Frame(constants.FrameType.DATA, 0,
                                          self.stream_id, chunk))
         if callback is not None:
             callback()
 
+    @_reset_on_error
     def finish(self):
+        if (self._expected_content_remaining is not None and
+                self._expected_content_remaining != 0):
+            raise HTTPOutputError(
+                "Tried to write %d bytes less than Content-Length" %
+                self._expected_content_remaining)
         self.conn._write_frame(Frame(constants.FrameType.DATA,
                                      constants.FrameFlag.END_STREAM,
                                      self.stream_id, b''))
