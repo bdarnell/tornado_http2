@@ -19,10 +19,15 @@ class Server(HTTPServer):
         super(Server, self).initialize(
             request_callback, ssl_options=ssl_options, **kwargs)
 
+    def _use_http2_cleartext(self):
+        return False
+
     def handle_stream(self, stream, address):
         if isinstance(stream, SSLIOStream):
             stream.wait_for_handshake(
                 functools.partial(self._handle_handshake, stream, address))
+        elif self._use_http2_cleartext():
+            self._start_http2(stream, address)
         else:
             self._handle_handshake(stream, address)
 
@@ -32,8 +37,16 @@ class Server(HTTPServer):
             # TODO: alpn when available
             proto = stream.socket.selected_npn_protocol()
             if proto == constants.HTTP2_TLS:
-                context = _HTTPRequestContext(stream, address, self.protocol)
-                conn = Connection(stream, False, context=context)
-                conn.start(self)
+                self._start_http2(stream, address)
                 return
         super(Server, self).handle_stream(stream, address)
+
+    def _start_http2(self, stream, address):
+        context = _HTTPRequestContext(stream, address, self.protocol)
+        conn = Connection(stream, False, context=context)
+        conn.start(self)
+
+
+class ForceHTTP2Server(Server):
+    def _use_http2_cleartext(self):
+        return True

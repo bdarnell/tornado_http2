@@ -5,6 +5,7 @@ import struct
 from tornado.concurrent import Future
 from tornado.escape import native_str, utf8
 from tornado import gen
+from tornado.http1connection import _GzipMessageDelegate
 from tornado.httputil import HTTPHeaders, RequestStartLine, ResponseStartLine
 from tornado.ioloop import IOLoop
 from tornado.iostream import StreamClosedError
@@ -14,7 +15,9 @@ from .hpack import HpackDecoder, HpackEncoder
 
 
 class Params(object):
-    pass
+    def __init__(self, chunk_size=None, decompress=False):
+        self.chunk_size = chunk_size or 65536
+        self.decompress = decompress
 
 
 Frame = collections.namedtuple('Frame', ['type', 'flags', 'stream_id', 'data'])
@@ -142,9 +145,13 @@ class Stream(object):
     def __init__(self, conn, stream_id, delegate, context=None):
         self.conn = conn
         self.stream_id = stream_id
-        self.delegate = delegate
+        self.orig_delegate = self.delegate = delegate
+        if self.conn.params.decompress:
+            self.delegate = _GzipMessageDelegate(delegate, self.conn.params.chunk_size)
         self.context = context
         self.finish_future = Future()
+        from tornado.util import ObjectDict
+        self.stream = ObjectDict(io_loop=IOLoop.current())  # TODO: remove
 
     def handle_frame(self, frame):
         if frame.type == constants.FrameType.HEADERS:
@@ -213,12 +220,14 @@ class Stream(object):
                       data)
         self.conn._write_frame(frame)
 
-        self.write(chunk)
+        self.write(chunk, callback=callback)
 
-    def write(self, chunk):
+    def write(self, chunk, callback=None):
         if chunk:
             self.conn._write_frame(Frame(constants.FrameType.DATA, 0,
                                          self.stream_id, chunk))
+        if callback is not None:
+            callback()
 
     def finish(self):
         self.conn._write_frame(Frame(constants.FrameType.DATA,
@@ -226,5 +235,5 @@ class Stream(object):
                                      self.stream_id, b''))
 
     def read_response(self, delegate):
-        assert delegate is self.delegate, 'cannot change delegate'
+        assert delegate is self.orig_delegate, 'cannot change delegate'
         return self.finish_future
