@@ -180,7 +180,7 @@ class Stream(object):
             if k.startswith(b':'):
                 pseudo_headers[native_str(k)] = native_str(v)
             else:
-                headers[native_str(k)] = native_str(v)
+                headers.add(native_str(k),  native_str(v))
         if self.conn.is_client:
             status = int(pseudo_headers[':status'])
             start_line = ResponseStartLine('HTTP/2.0', status, responses.get(status, ''))
