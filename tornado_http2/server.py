@@ -1,7 +1,9 @@
 import functools
 
+from tornado import gen
 from tornado.httpserver import HTTPServer, _HTTPRequestContext
-from tornado.iostream import SSLIOStream
+from tornado.ioloop import IOLoop
+from tornado.iostream import SSLIOStream, StreamClosedError
 from tornado.netutil import ssl_options_to_context
 
 from tornado_http2.connection import Connection
@@ -26,8 +28,6 @@ class Server(HTTPServer):
         if isinstance(stream, SSLIOStream):
             stream.wait_for_handshake(
                 functools.partial(self._handle_handshake, stream, address))
-        elif self._use_http2_cleartext():
-            self._start_http2(stream, address)
         else:
             self._handle_handshake(stream, address)
 
@@ -39,6 +39,9 @@ class Server(HTTPServer):
             if proto == constants.HTTP2_TLS:
                 self._start_http2(stream, address)
                 return
+        self._start_http1(stream, address)
+
+    def _start_http1(self, stream, address):
         super(Server, self).handle_stream(stream, address)
 
     def _start_http2(self, stream, address):
@@ -47,6 +50,20 @@ class Server(HTTPServer):
         conn.start(self)
 
 
-class ForceHTTP2Server(Server):
-    def _use_http2_cleartext(self):
-        return True
+class CleartextHTTP2Server(Server):
+    def _start_http1(self, stream, address):
+        IOLoop.current().spawn_callback(self._read_first_line, stream, address)
+
+    @gen.coroutine
+    def _read_first_line(self, stream, address):
+        try:
+            first_line = yield stream.read_until(b'\r\n\r\n')
+            # TODO: make this less hacky
+            stream._read_buffer.appendleft(first_line)
+            stream._read_buffer_size += len(first_line)
+            if first_line == b'PRI * HTTP/2.0\r\n\r\n':
+                self._start_http2(stream, address)
+            else:
+                super(CleartextHTTP2Server, self)._start_http1(stream, address)
+        except StreamClosedError:
+            pass
