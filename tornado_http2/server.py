@@ -101,8 +101,18 @@ class _UpgradingConnection(HTTPConnection):
         self.written_chunks = []
         self.write_finished = False
 
+        # TODO: remove
+        from tornado.util import ObjectDict
+        self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close)
+
     def set_close_callback(self, callback):
         pass # TODO
+
+    def set_max_body_size(self, max_body_size):
+        pass # TODO
+
+    def detach(self):
+        return self.conn.detach()
 
     def write_headers(self, start_line, headers, chunk=None, callback=None):
         if self.upgrading:
