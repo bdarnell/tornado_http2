@@ -18,7 +18,11 @@ class Server(HTTPServer):
                     raise KeyError('missing key "certfile" in ssl_options')
                 ssl_options = ssl_options_to_context(ssl_options)
             ssl_options.set_npn_protocols([constants.HTTP2_TLS])
-        self.http2_params = Params(decompress=kwargs.get('decompress_request', False))
+        # TODO: add h2-specific parameters like frame size instead of header size.
+        self.http2_params = Params(
+            max_header_size=kwargs.get('max_header_size'),
+            decompress=kwargs.get('decompress_request', False),
+        )
         super(Server, self).initialize(
             request_callback, ssl_options=ssl_options, **kwargs)
 
@@ -58,11 +62,23 @@ class CleartextHTTP2Server(Server):
     @gen.coroutine
     def _read_first_line(self, stream, address):
         try:
-            first_line = yield stream.read_until(b'\r\n\r\n')
+            header_future = stream.read_until_regex(b'\r?\n\r?\n',
+                                                    max_bytes=self.conn_params.max_header_size)
+            if self.conn_params.header_timeout is None:
+                header_data = yield header_future
+            else:
+                try:
+                    header_data = yield gen.with_timeout(
+                        stream.io_loop.time() + self.conn_params.header_timeout,
+                        header_future,
+                        quiet_exceptions=StreamClosedError)
+                except gen.TimeoutError:
+                    stream.close()
+                    return
             # TODO: make this less hacky
-            stream._read_buffer.appendleft(first_line)
-            stream._read_buffer_size += len(first_line)
-            if first_line == b'PRI * HTTP/2.0\r\n\r\n':
+            stream._read_buffer.appendleft(header_data)
+            stream._read_buffer_size += len(header_data)
+            if header_data == b'PRI * HTTP/2.0\r\n\r\n':
                 self._start_http2(stream, address)
             else:
                 super(CleartextHTTP2Server, self)._start_http1(stream, address)

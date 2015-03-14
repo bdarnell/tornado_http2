@@ -9,14 +9,16 @@ from tornado.http1connection import _GzipMessageDelegate
 from tornado.httputil import HTTPHeaders, RequestStartLine, ResponseStartLine, responses
 from tornado.ioloop import IOLoop
 from tornado.iostream import StreamClosedError
+from tornado.log import gen_log
 
 from . import constants
 from .hpack import HpackDecoder, HpackEncoder
 
 
 class Params(object):
-    def __init__(self, chunk_size=None, decompress=False):
+    def __init__(self, chunk_size=None, max_header_size=None, decompress=False):
         self.chunk_size = chunk_size or 65536
+        self.max_header_size = max_header_size or 65536
         self.decompress = decompress
 
 
@@ -149,7 +151,8 @@ class Stream(object):
         self.context = context
         self.finish_future = Future()
         from tornado.util import ObjectDict
-        self.stream = ObjectDict(io_loop=IOLoop.current())  # TODO: remove
+        # TODO: remove
+        self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close)
 
     def set_delegate(self, delegate):
         self.orig_delegate = self.delegate = delegate
@@ -171,6 +174,10 @@ class Stream(object):
         if not (frame.flags & constants.FrameFlag.END_HEADERS):
             raise Exception("Continuation frames not yet supported")
         data = frame.data
+        if len(data) > self.conn.params.max_header_size:
+            # TODO: this matches the h1 behavior but isn't right.
+            gen_log.warning("Unsatisfiable read")
+            return
         if frame.flags & constants.FrameFlag.PRIORITY:
             # TODO: support PRIORITY and PADDING
             data = data[5:]
