@@ -33,6 +33,7 @@ class Connection(object):
             params = Params()
         self.params = params
         self.context = context
+        self._initial_settings_written = Future()
 
         self.streams = {}
         self.next_stream_id = 1 if is_client else 2
@@ -65,6 +66,7 @@ class Connection(object):
                     raise Exception("expected client preface, got %s" %
                                     preface)
             self._write_frame(self._settings_frame())
+            self._initial_settings_written.set_result(None)
             while True:
                 frame = yield self._read_frame()
                 logging.debug('got frame %r', frame)

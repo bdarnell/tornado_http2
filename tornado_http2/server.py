@@ -1,12 +1,14 @@
 import functools
 
+from tornado.escape import utf8
 from tornado import gen
-from tornado.httpserver import HTTPServer, _HTTPRequestContext
+from tornado.httpserver import HTTPServer, _HTTPRequestContext, _ServerRequestAdapter
+from tornado.httputil import HTTPConnection, RequestStartLine
 from tornado.ioloop import IOLoop
 from tornado.iostream import SSLIOStream, StreamClosedError
 from tornado.netutil import ssl_options_to_context
 
-from tornado_http2.connection import Connection, Params
+from tornado_http2.connection import Connection, Params, Stream
 from tornado_http2 import constants
 
 
@@ -84,3 +86,83 @@ class CleartextHTTP2Server(Server):
                 super(CleartextHTTP2Server, self)._start_http1(stream, address)
         except StreamClosedError:
             pass
+
+    def start_request(self, server_conn, request_conn):
+        return _UpgradingRequestAdapter(self, server_conn, request_conn)
+
+
+class _UpgradingConnection(HTTPConnection):
+    def __init__(self, conn, http2_params):
+        self.conn = conn
+        self.context = conn.context
+        self.http2_params = http2_params
+        self.upgrading = False
+        self.written_headers = None
+        self.written_chunks = []
+        self.write_finished = False
+
+    def set_close_callback(self, callback):
+        pass # TODO
+
+    def write_headers(self, start_line, headers, chunk=None, callback=None):
+        if self.upgrading:
+            self.written_headers = (start_line, headers, chunk, callback)
+        else:
+            return self.conn.write_headers(start_line, headers, chunk, callback)
+
+    def write(self, chunk, callback=None):
+        if self.upgrading:
+            self.written_chunks.append((chunk, callback))
+        else:
+            return self.conn.write(chunk, callback)
+
+    def finish(self):
+        if self.upgrading:
+            self.write_finished = True
+        else:
+            return self.conn.finish()
+
+    def switch_protocols(self):
+        stream = self.conn.detach()
+        stream.write(utf8(
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Connection: Upgrade\r\n"
+            "Upgrade: %s\r\n"
+            "\r\n" % constants.HTTP2_CLEAR))
+        h2_conn = Connection(stream, False, params=self.http2_params,
+                             context=self.context)
+        h2_conn.start(self)
+        self.conn = Stream(h2_conn, 1, None, context=self.context)
+        self.conn._request_start_line = self._request_start_line
+        h2_conn._initial_settings_written.add_done_callback(self._finish_upgrade)
+
+    def _finish_upgrade(self, future):
+        if self.written_headers is not None:
+            self.conn.write_headers(*self.written_headers)
+        for write in self.written_chunks:
+            self.conn.write(*write)
+        if self.write_finished:
+            self.conn.finish()
+        self.upgrading = False
+
+
+class _UpgradingRequestAdapter(_ServerRequestAdapter):
+    def __init__(self, server, server_conn, request_conn):
+        request_conn = _UpgradingConnection(request_conn,
+                                            server.http2_params)
+        super(_UpgradingRequestAdapter, self).__init__(
+            server, server_conn, request_conn)
+
+    def headers_received(self, start_line, headers):
+        if 'Upgrade' in headers:
+            upgrades = set(i.strip() for i in headers['Upgrade'].split(','))
+            if constants.HTTP2_CLEAR in upgrades:
+                self.connection.upgrading = True
+        self.connection._request_start_line = start_line
+        super(_UpgradingRequestAdapter, self).headers_received(
+            start_line, headers)
+
+    def finish(self):
+        if self.connection.upgrading:
+            self.connection.switch_protocols()
+        return super(_UpgradingRequestAdapter, self).finish()
