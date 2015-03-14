@@ -269,8 +269,13 @@ class Stream(object):
                         "Tried to write more data than Content-Length")
             self.conn._write_frame(Frame(constants.FrameType.DATA, 0,
                                          self.stream_id, chunk))
+        # TODO: flow control
         if callback is not None:
             callback()
+        else:
+            future = Future()
+            future.set_result(None)
+            return future
 
     @_reset_on_error
     def finish(self):
