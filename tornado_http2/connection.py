@@ -6,7 +6,7 @@ from tornado.concurrent import Future
 from tornado.escape import native_str, utf8
 from tornado import gen
 from tornado.http1connection import _GzipMessageDelegate
-from tornado.httputil import HTTPHeaders, RequestStartLine, ResponseStartLine
+from tornado.httputil import HTTPHeaders, RequestStartLine, ResponseStartLine, responses
 from tornado.ioloop import IOLoop
 from tornado.iostream import StreamClosedError
 
@@ -178,8 +178,8 @@ class Stream(object):
             else:
                 headers[native_str(k)] = native_str(v)
         if self.conn.is_client:
-            start_line = ResponseStartLine('HTTP/2.0',
-                                           int(pseudo_headers[':status']), '')
+            status = int(pseudo_headers[':status'])
+            start_line = ResponseStartLine('HTTP/2.0', status, responses.get(status, ''))
         else:
             start_line = RequestStartLine(pseudo_headers[':method'],
                                           pseudo_headers[':path'], 'HTTP/2.0')
