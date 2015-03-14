@@ -6,7 +6,7 @@ from tornado.ioloop import IOLoop
 from tornado.iostream import SSLIOStream, StreamClosedError
 from tornado.netutil import ssl_options_to_context
 
-from tornado_http2.connection import Connection
+from tornado_http2.connection import Connection, Params
 from tornado_http2 import constants
 
 
@@ -18,6 +18,7 @@ class Server(HTTPServer):
                     raise KeyError('missing key "certfile" in ssl_options')
                 ssl_options = ssl_options_to_context(ssl_options)
             ssl_options.set_npn_protocols([constants.HTTP2_TLS])
+        self.http2_params = Params(decompress=kwargs.get('decompress_request', False))
         super(Server, self).initialize(
             request_callback, ssl_options=ssl_options, **kwargs)
 
@@ -46,7 +47,7 @@ class Server(HTTPServer):
 
     def _start_http2(self, stream, address):
         context = _HTTPRequestContext(stream, address, self.protocol)
-        conn = Connection(stream, False, context=context)
+        conn = Connection(stream, False, params=self.http2_params, context=context)
         conn.start(self)
 
 

@@ -75,7 +75,7 @@ class Connection(object):
                                         frame.stream_id)
                     stream = Stream(self, frame.stream_id, None,
                                     context=self.context)
-                    stream.delegate = delegate.start_request(self, stream)
+                    stream.set_delegate(delegate.start_request(self, stream))
                     self.streams[frame.stream_id] = stream
                     stream.handle_frame(frame)
                 else:
@@ -145,13 +145,17 @@ class Stream(object):
     def __init__(self, conn, stream_id, delegate, context=None):
         self.conn = conn
         self.stream_id = stream_id
-        self.orig_delegate = self.delegate = delegate
-        if self.conn.params.decompress:
-            self.delegate = _GzipMessageDelegate(delegate, self.conn.params.chunk_size)
+        self.set_delegate(delegate)
         self.context = context
         self.finish_future = Future()
         from tornado.util import ObjectDict
         self.stream = ObjectDict(io_loop=IOLoop.current())  # TODO: remove
+
+    def set_delegate(self, delegate):
+        self.orig_delegate = self.delegate = delegate
+        if self.conn.params.decompress:
+            self.delegate = _GzipMessageDelegate(delegate, self.conn.params.chunk_size)
+
 
     def handle_frame(self, frame):
         if frame.type == constants.FrameType.HEADERS:
