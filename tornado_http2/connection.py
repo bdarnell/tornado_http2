@@ -83,7 +83,14 @@ class Connection(object):
                     self.streams[frame.stream_id] = stream
                     stream.handle_frame(frame)
                 else:
-                    self.streams[frame.stream_id].handle_frame(frame)
+                    try:
+                        stream = self.streams[frame.stream_id]
+                    except Exception:
+                        # RST on an inactive stream is not a problem.
+                        if frame.type != constants.FrameType.RST_STREAM:
+                            raise
+                    else:
+                        stream.handle_frame(frame)
         except StreamClosedError:
             return
         except GeneratorExit:
