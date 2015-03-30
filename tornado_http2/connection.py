@@ -225,7 +225,7 @@ class Stream(object):
 
     def _handle_rst_stream_frame(self, frame):
         if self._need_delegate_close:
-            delegate.on_connection_close()
+            self.delegate.on_connection_close()
 
     def set_close_callback(self, callback):
         # TODO: this shouldn't be necessary
@@ -259,7 +259,7 @@ class Stream(object):
                       data)
         self.conn._write_frame(frame)
 
-        self.write(chunk, callback=callback)
+        return self.write(chunk, callback=callback)
 
     @_reset_on_error
     def write(self, chunk, callback=None):

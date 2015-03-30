@@ -7,6 +7,7 @@ from tornado.httputil import HTTPConnection, RequestStartLine
 from tornado.ioloop import IOLoop
 from tornado.iostream import SSLIOStream, StreamClosedError
 from tornado.netutil import ssl_options_to_context
+from tornado import stack_context
 
 from tornado_http2.connection import Connection, Params, Stream
 from tornado_http2 import constants
@@ -100,16 +101,31 @@ class _UpgradingConnection(HTTPConnection):
         self.written_headers = None
         self.written_chunks = []
         self.write_finished = False
+        self.close_callback = None
+        self.max_body_size = None
+        self.body_timeout = None
 
         # TODO: remove
         from tornado.util import ObjectDict
         self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close)
 
     def set_close_callback(self, callback):
-        pass # TODO
+        if self.upgrading:
+            self.close_callback = stack_context.wrap(callback)
+        else:
+            self.conn.set_close_callback(callback)
 
     def set_max_body_size(self, max_body_size):
-        pass # TODO
+        if self.upgrading:
+            self.max_body_size = max_body_size
+        else:
+            self.conn.set_max_body_size(max_body_size)
+
+    def set_body_timeout(self, body_timeout):
+        if self.upgrading:
+            self.body_timeout = body_timeout
+        else:
+            self.conn.set_body_timeout(body_timeout)
 
     def detach(self):
         return self.conn.detach()
@@ -153,6 +169,13 @@ class _UpgradingConnection(HTTPConnection):
             self.conn.write(*write)
         if self.write_finished:
             self.conn.finish()
+        if self.max_body_size is not None:
+            self.conn.set_max_body_size(self.max_body_size)
+        if self.body_timeout is not None:
+            self.conn.set_body_timeout(self.body_timeout)
+        if self.close_callback is not None:
+            self.conn.set_close_callback(self.close_callback)
+            self.close_callback = None
         self.upgrading = False
 
 
