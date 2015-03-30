@@ -150,8 +150,7 @@ def _reset_on_error(f):
         try:
             return f(self, *args, **kw)
         except Exception:
-            self.conn._write_frame(Frame(constants.FrameType.RST_STREAM,
-                                         0, self.stream_id, b'\x00\x00\x00\x00'))
+            self.reset()
             raise
     return wrapper
 
@@ -230,6 +229,10 @@ class Stream(object):
     def set_close_callback(self, callback):
         # TODO: this shouldn't be necessary
         pass
+
+    def reset(self):
+        self.conn._write_frame(Frame(constants.FrameType.RST_STREAM,
+                                     0, self.stream_id, b'\x00\x00\x00\x00'))
 
     @_reset_on_error
     def write_headers(self, start_line, headers, chunk=None, callback=None):

@@ -5,7 +5,8 @@ from tornado import gen
 from tornado.httpserver import HTTPServer, _HTTPRequestContext, _ServerRequestAdapter
 from tornado.httputil import HTTPConnection, RequestStartLine
 from tornado.ioloop import IOLoop
-from tornado.iostream import SSLIOStream, StreamClosedError
+from tornado.iostream import SSLIOStream, StreamClosedError, UnsatisfiableReadError
+from tornado.log import app_log
 from tornado.netutil import ssl_options_to_context
 from tornado import stack_context
 
@@ -85,7 +86,7 @@ class CleartextHTTP2Server(Server):
                 self._start_http2(stream, address)
             else:
                 super(CleartextHTTP2Server, self)._start_http1(stream, address)
-        except StreamClosedError:
+        except (StreamClosedError, UnsatisfiableReadError):
             pass
 
     def start_request(self, server_conn, request_conn):
@@ -148,7 +149,8 @@ class _UpgradingConnection(HTTPConnection):
         else:
             return self.conn.finish()
 
-    def switch_protocols(self):
+    @gen.coroutine
+    def switch_protocols(self, callback):
         stream = self.conn.detach()
         stream.write(utf8(
             "HTTP/1.1 101 Switching Protocols\r\n"
@@ -159,10 +161,12 @@ class _UpgradingConnection(HTTPConnection):
                              context=self.context)
         h2_conn.start(self)
         self.conn = Stream(h2_conn, 1, None, context=self.context)
-        self.conn._request_start_line = self._request_start_line
-        h2_conn._initial_settings_written.add_done_callback(self._finish_upgrade)
+        self.conn._request_start_line = RequestStartLine(
+            self._request_start_line.method,
+            self._request_start_line.path,
+            'HTTP/2.0')
+        yield h2_conn._initial_settings_written
 
-    def _finish_upgrade(self, future):
         if self.written_headers is not None:
             self.conn.write_headers(*self.written_headers)
         for write in self.written_chunks:
@@ -178,6 +182,12 @@ class _UpgradingConnection(HTTPConnection):
             self.close_callback = None
         self.upgrading = False
 
+        try:
+            callback()
+        except Exception:
+            app_log.error("Exception in callback", exc_info=True)
+            self.conn.reset()
+
 
 class _UpgradingRequestAdapter(_ServerRequestAdapter):
     def __init__(self, server, server_conn, request_conn):
@@ -191,11 +201,15 @@ class _UpgradingRequestAdapter(_ServerRequestAdapter):
             upgrades = set(i.strip() for i in headers['Upgrade'].split(','))
             if constants.HTTP2_CLEAR in upgrades:
                 self.connection.upgrading = True
+                start_line = RequestStartLine(
+                    start_line.method, start_line.path, 'HTTP/2.0')
         self.connection._request_start_line = start_line
         super(_UpgradingRequestAdapter, self).headers_received(
             start_line, headers)
 
     def finish(self):
+        finish = super(_UpgradingRequestAdapter, self).finish
         if self.connection.upgrading:
-            self.connection.switch_protocols()
-        return super(_UpgradingRequestAdapter, self).finish()
+            self.connection.switch_protocols(finish)
+        else:
+            finish()
