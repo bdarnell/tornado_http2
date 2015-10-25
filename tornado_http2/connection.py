@@ -223,7 +223,8 @@ class Stream(object):
             self.finish_future.set_result(None)
 
     def _handle_data_frame(self, frame):
-        self.delegate.data_received(frame.data)
+        if frame.data:
+            self.delegate.data_received(frame.data)
         if frame.flags & constants.FrameFlag.END_STREAM:
             self._need_delegate_close = False
             self.delegate.finish()
