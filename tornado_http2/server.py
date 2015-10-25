@@ -56,6 +56,7 @@ class Server(HTTPServer):
     def _start_http2(self, stream, address):
         context = _HTTPRequestContext(stream, address, self.protocol)
         conn = Connection(stream, False, params=self.http2_params, context=context)
+        self._connections.add(conn)
         conn.start(self)
 
 
@@ -160,6 +161,7 @@ class _UpgradingConnection(HTTPConnection):
             "\r\n" % constants.HTTP2_CLEAR))
         h2_conn = Connection(stream, False, params=self.http2_params,
                              context=self.context)
+        self.server._connections.add(h2_conn)
         h2_conn.start(self.server)
         self.conn = Stream(h2_conn, 1, None, context=self.context)
         self.conn._request_start_line = RequestStartLine(

@@ -34,6 +34,7 @@ class Connection(object):
         self.params = params
         self.context = context
         self._initial_settings_written = Future()
+        self._serving_future = None
 
         self.streams = {}
         self.next_stream_id = 1 if is_client else 2
@@ -42,10 +43,20 @@ class Connection(object):
         self.hpack_encoder = HpackEncoder(
             constants.Setting.HEADER_TABLE_SIZE.default)
 
+    @gen.coroutine
+    def close(self):
+        self.stream.close()
+        # Block until the serving loop is done, but ignore any exceptions
+        # (start() is already responsible for logging them).
+        try:
+            yield self._serving_future
+        except Exception:
+            pass
+
     def start(self, delegate):
-        fut = self._conn_loop(delegate)
-        IOLoop.current().add_future(fut, lambda f: f.result())
-        return fut
+        self._serving_future = self._conn_loop(delegate)
+        IOLoop.current().add_future(self._serving_future, lambda f: f.result())
+        return self._serving_future
 
     def create_stream(self, delegate):
         stream = Stream(self, self.next_stream_id, delegate,
@@ -100,6 +111,9 @@ class Connection(object):
         except:
             self.stream.close()
             raise
+        finally:
+            if delegate is not None:
+                delegate.on_close(self)
 
     def handle_frame(self, frame):
         if frame.type == constants.FrameType.SETTINGS:
