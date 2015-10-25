@@ -173,7 +173,7 @@ class Stream(object):
         # TODO: remove
         self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close)
         self._expected_content_remaining = None
-        self._need_delegate_close = False
+        self._delegate_started = False
 
     def set_delegate(self, delegate):
         self.orig_delegate = self.delegate = delegate
@@ -195,8 +195,21 @@ class Stream(object):
             raise Exception("Continuation frames not yet supported")
         data = frame.data
         if len(data) > self.conn.params.max_header_size:
-            # TODO: this matches the h1 behavior but isn't right.
-            gen_log.warning("Unsatisfiable read")
+            if self.conn.is_client:
+                # TODO: Need tests for client side of headers-too-large.
+                # What's the best way to send an error?
+                self.delegate.on_connection_close()
+            else:
+                # write_headers needs a start line so it can tell
+                # whether this is a HEAD or not. If we're rejecting
+                # the headers we can't know so just make something up.
+                # Note that this means the error response body MUST be
+                # zero bytes so it doesn't matter whether the client
+                # sent a HEAD or a GET.
+                self._request_start_line = RequestStartLine('GET', '/', 'HTTP/2.0')
+                start_line = ResponseStartLine('HTTP/2.0', 431, 'Headers too large')
+                self.write_headers(start_line, HTTPHeaders())
+                self.finish()
             return
         if frame.flags & constants.FrameFlag.PRIORITY:
             # TODO: support PRIORITY and PADDING
@@ -216,22 +229,23 @@ class Stream(object):
                                           pseudo_headers[':path'], 'HTTP/2.0')
         self._request_start_line = start_line
 
-        self._need_delegate_close = True
+        self._delegate_started = True
         self.delegate.headers_received(start_line, headers)
         if frame.flags & constants.FrameFlag.END_STREAM:
             self.delegate.finish()
             self.finish_future.set_result(None)
 
     def _handle_data_frame(self, frame):
-        if frame.data:
+        if frame.data and self._delegate_started:
             self.delegate.data_received(frame.data)
         if frame.flags & constants.FrameFlag.END_STREAM:
-            self._need_delegate_close = False
-            self.delegate.finish()
+            if self._delegate_started:
+                self._delegate_started = False
+                self.delegate.finish()
             self.finish_future.set_result(None)
 
     def _handle_rst_stream_frame(self, frame):
-        if self._need_delegate_close:
+        if self._delegate_started:
             self.delegate.on_connection_close()
 
     def set_close_callback(self, callback):
