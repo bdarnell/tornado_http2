@@ -217,6 +217,8 @@ class Stream(object):
         pseudo_headers = {}
         headers = HTTPHeaders()
         for k, v, idx in self.conn.hpack_decoder.decode(bytearray(data)):
+            if k == b":authority":
+                headers.add("Host", native_str(v))
             if k.startswith(b':'):
                 pseudo_headers[native_str(k)] = native_str(v)
             else:
