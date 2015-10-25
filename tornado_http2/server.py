@@ -94,10 +94,11 @@ class CleartextHTTP2Server(Server):
 
 
 class _UpgradingConnection(HTTPConnection):
-    def __init__(self, conn, http2_params):
+    def __init__(self, conn, http2_params, server):
         self.conn = conn
         self.context = conn.context
         self.http2_params = http2_params
+        self.server = server
         self.upgrading = False
         self.written_headers = None
         self.written_chunks = []
@@ -159,7 +160,7 @@ class _UpgradingConnection(HTTPConnection):
             "\r\n" % constants.HTTP2_CLEAR))
         h2_conn = Connection(stream, False, params=self.http2_params,
                              context=self.context)
-        h2_conn.start(self)
+        h2_conn.start(self.server)
         self.conn = Stream(h2_conn, 1, None, context=self.context)
         self.conn._request_start_line = RequestStartLine(
             self._request_start_line.method,
@@ -192,7 +193,8 @@ class _UpgradingConnection(HTTPConnection):
 class _UpgradingRequestAdapter(_ServerRequestAdapter):
     def __init__(self, server, server_conn, request_conn):
         request_conn = _UpgradingConnection(request_conn,
-                                            server.http2_params)
+                                            server.http2_params,
+                                            server)
         super(_UpgradingRequestAdapter, self).__init__(
             server, server_conn, request_conn)
 
