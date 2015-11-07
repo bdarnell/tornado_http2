@@ -1,5 +1,8 @@
-certifi==14.5.14
-py==1.4.26
-tornado==4.1
-tox==1.8.1
-virtualenv==12.0.7
+tornado==4.3
+tox==2.1.1
+
+# Indirect dependencies.
+pluggy==0.3.1
+py==1.4.30
+virtualenv==13.1.2
+wheel==0.26.0
