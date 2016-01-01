@@ -27,7 +27,15 @@ Frame = collections.namedtuple('Frame', ['type', 'flags', 'stream_id', 'data'])
 
 class ConnectionError(Exception):
     """A protocol-level error which shuts down the entire connection."""
-    def __init__(self, code):
+    def __init__(self, code, message=None):
+        self.code = code
+        self.message = message
+
+
+class StreamError(Exception):
+    """An error which terminates a stream but leaves the connection intact."""
+    def __init__(self, stream_id, code):
+        self.stream_id = stream_id
         self.code = code
 
 
@@ -84,42 +92,55 @@ class Connection(object):
                                     preface)
             self._write_frame(self._settings_frame())
             self._initial_settings_written.set_result(None)
-            try:
-                while True:
+            max_remote_stream_id = 0
+            while True:
+                try:
                     frame = yield self._read_frame()
                     logging.debug('got frame %r', frame)
                     if frame.stream_id == 0:
                         self.handle_frame(frame)
+                    elif frame.stream_id in self.streams:
+                        self.streams[frame.stream_id].handle_frame(frame)
                     elif (not self.is_client and
                           frame.type == constants.FrameType.HEADERS):
-                        if frame.stream_id in self.streams:
-                            raise Exception("already have stream %d",
-                                            frame.stream_id)
+                        if frame.stream_id > max_remote_stream_id:
+                            max_remote_stream_id = frame.stream_id
                         stream = Stream(self, frame.stream_id, None,
                                         context=self.context)
                         stream.set_delegate(delegate.start_request(self, stream))
                         self.streams[frame.stream_id] = stream
                         stream.handle_frame(frame)
                     else:
-                        try:
-                            stream = self.streams[frame.stream_id]
-                        except Exception:
-                            # RST on an inactive stream is not a problem.
-                            if frame.type != constants.FrameType.RST_STREAM:
-                                raise ConnectionError(
-                                    constants.ErrorCode.PROTOCOL_ERROR)
+                        # We don't have the stream and can't create it.
+                        # The error depends on whether the stream id
+                        # is from the past or future.
+                        is_local = ((frame.stream_id & 1) ==
+                                    (self.next_stream_id & 1))
+                        if is_local:
+                            max_stream_id = self.next_stream_id - 2
                         else:
-                            stream.handle_frame(frame)
-            except ConnectionError as e:
-                # TODO: set last_stream_id
-                yield self._write_frame(self._goaway_frame(e.code, 0))
-                self.stream.close()
-                return
-        except StreamClosedError:
+                            max_stream_id = max_remote_stream_id
+                        if frame.stream_id <= max_stream_id:
+                            raise StreamError(
+                                frame.stream_id,
+                                constants.ErrorCode.STREAM_CLOSED)
+                        else:
+                            raise ConnectionError(
+                                constants.ErrorCode.PROTOCOL_ERROR)
+                except StreamError as e:
+                    yield self._write_frame(self._rst_stream_frame(
+                        e.stream_id, e.code))
+        except ConnectionError as e:
+            # TODO: set last_stream_id
+            yield self._write_frame(self._goaway_frame(
+                e.code, 0, e.message))
+            self.stream.close()
             return
         except GeneratorExit:
             # The generator is being garbage collected; don't close the
             # stream because the IOLoop is going away too.
+            return
+        except StreamClosedError:
             return
         except:
             gen_log.error("closing stream due to uncaught exception",
@@ -165,9 +186,15 @@ class Connection(object):
         data = yield self.stream.read_bytes(data_len)
         raise gen.Return(Frame(typ, flags, stream_id, data))
 
-    def _goaway_frame(self, error_code, last_stream_id):
+    def _goaway_frame(self, error_code, last_stream_id, message):
         payload = struct.pack('>ii', last_stream_id, error_code.code)
+        if message:
+            payload = payload + utf8(message)
         return Frame(constants.FrameType.GOAWAY, 0, 0, payload)
+
+    def _rst_stream_frame(self, stream_id, error_code):
+        payload = struct.pack('>i', error_code.code)
+        return Frame(constants.FrameType.RST_STREAM, 0, stream_id, payload)
 
     def _setting(self, setting):
         # TODO: respect changed settings.
@@ -231,6 +258,8 @@ class Stream(object):
             self.delegate = _GzipMessageDelegate(delegate, self.conn.params.chunk_size)
 
     def handle_frame(self, frame):
+        if self.finish_future.done():
+            raise StreamError(self.stream_id, constants.ErrorCode.STREAM_CLOSED)
         if frame.type == constants.FrameType.HEADERS:
             self._handle_headers_frame(frame)
         elif frame.type == constants.FrameType.DATA:
