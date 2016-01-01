@@ -295,8 +295,14 @@ class Stream(object):
                 self.finish()
             return
         if frame.flags & constants.FrameFlag.PRIORITY:
-            # TODO: support PRIORITY and PADDING
+            # TODO: support PRIORITY and PADDING.
+            # This is just enough to cover an error case tested in h2spec.
+            stream_dep, weight = struct.unpack('>ib', data[:5])
             data = data[5:]
+            # strip off the "exclusive" bit
+            stream_dep = stream_dep & 0x7fffffff
+            if stream_dep == frame.stream_id:
+                raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR)
         pseudo_headers = {}
         headers = HTTPHeaders()
         try:
