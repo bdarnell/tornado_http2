@@ -16,6 +16,7 @@ def all():
 
 
 def main():
+    import tornado_http2.test.h2spec_test  # for option definitions
     define('httpclient', type=str, default=None)
 
     def configure_httpclient():

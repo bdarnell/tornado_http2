@@ -3,11 +3,15 @@ from __future__ import print_function
 import os
 import subprocess
 from unittest import skipIf
+from tornado.options import define, options
 from tornado.process import Subprocess
 from tornado.testing import gen_test
 from tornado.web import Application
 
 from tornado_http2.test.util import AsyncHTTP2TestCase
+
+define("h2spec_section", type=str, multiple=True,
+       help="h2spec section to run (e.g. '6.2')")
 
 # To create or update the GLOCKFILE, set GOPATH to a temporary
 # directory and run:
@@ -48,6 +52,9 @@ class H2SpecTest(AsyncHTTP2TestCase):
     # it can take a while to run, so give it a longer timeout.
     @gen_test(timeout=60)
     def test_h2spec(self):
-        h2spec_proc = Subprocess([self.h2spec_path, "-p",
-                                  str(self.get_http_port())])
+        h2spec_cmd = [self.h2spec_path, "-p",
+                      str(self.get_http_port())]
+        for section in options.h2spec_section:
+            h2spec_cmd.extend(["-s", section])
+        h2spec_proc = Subprocess(h2spec_cmd)
         yield h2spec_proc.wait_for_exit()

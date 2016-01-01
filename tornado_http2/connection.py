@@ -25,6 +25,11 @@ class Params(object):
 Frame = collections.namedtuple('Frame', ['type', 'flags', 'stream_id', 'data'])
 
 
+class ConnectionError(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
 class Connection(object):
     def __init__(self, stream, is_client, params=None, context=None):
         self.stream = stream
@@ -78,30 +83,36 @@ class Connection(object):
                                     preface)
             self._write_frame(self._settings_frame())
             self._initial_settings_written.set_result(None)
-            while True:
-                frame = yield self._read_frame()
-                logging.debug('got frame %r', frame)
-                if frame.stream_id == 0:
-                    self.handle_frame(frame)
-                elif (not self.is_client and
-                      frame.type == constants.FrameType.HEADERS):
-                    if frame.stream_id in self.streams:
-                        raise Exception("already have stream %d",
-                                        frame.stream_id)
-                    stream = Stream(self, frame.stream_id, None,
-                                    context=self.context)
-                    stream.set_delegate(delegate.start_request(self, stream))
-                    self.streams[frame.stream_id] = stream
-                    stream.handle_frame(frame)
-                else:
-                    try:
-                        stream = self.streams[frame.stream_id]
-                    except Exception:
-                        # RST on an inactive stream is not a problem.
-                        if frame.type != constants.FrameType.RST_STREAM:
-                            raise
-                    else:
+            try:
+                while True:
+                    frame = yield self._read_frame()
+                    logging.debug('got frame %r', frame)
+                    if frame.stream_id == 0:
+                        self.handle_frame(frame)
+                    elif (not self.is_client and
+                          frame.type == constants.FrameType.HEADERS):
+                        if frame.stream_id in self.streams:
+                            raise Exception("already have stream %d",
+                                            frame.stream_id)
+                        stream = Stream(self, frame.stream_id, None,
+                                        context=self.context)
+                        stream.set_delegate(delegate.start_request(self, stream))
+                        self.streams[frame.stream_id] = stream
                         stream.handle_frame(frame)
+                    else:
+                        try:
+                            stream = self.streams[frame.stream_id]
+                        except Exception:
+                            # RST on an inactive stream is not a problem.
+                            if frame.type != constants.FrameType.RST_STREAM:
+                                raise ConnectionError(
+                                    constants.ErrorCode.PROTOCOL_ERROR)
+                        else:
+                            stream.handle_frame(frame)
+            except ConnectionError as e:
+                yield self._write_frame(self._goaway_frame(e.code, 0))
+                self.stream.close()
+                return
         except StreamClosedError:
             return
         except GeneratorExit:
@@ -109,6 +120,8 @@ class Connection(object):
             # stream because the IOLoop is going away too.
             return
         except:
+            gen_log.error("closing stream due to uncaught exception",
+                          exc_info=True)
             self.stream.close()
             raise
         finally:
@@ -121,6 +134,8 @@ class Connection(object):
         elif frame.type == constants.FrameType.WINDOW_UPDATE:
             # TODO: handle WINDOW_UPDATE
             pass
+        elif frame.type == constants.FrameType.PING:
+            self._handle_ping_frame(frame)
         else:
             raise Exception("invalid frame type %s for stream 0", frame.type)
 
@@ -146,6 +161,10 @@ class Connection(object):
         data = yield self.stream.read_bytes(data_len)
         raise gen.Return(Frame(typ, flags, stream_id, data))
 
+    def _goaway_frame(self, error_code, last_stream_id):
+        payload = struct.pack('>ii', last_stream_id, error_code.code)
+        return Frame(constants.FrameType.GOAWAY, 0, 0, payload)
+
     def _settings_frame(self):
         # TODO: parameterize?
         if self.is_client:
@@ -164,6 +183,15 @@ class Connection(object):
         else:
             # TODO: respect changed settings.
             self._write_frame(self._settings_ack_frame())
+
+    def _handle_ping_frame(self, frame):
+        if frame.flags & constants.FrameFlag.ACK:
+            return
+        if len(frame.data) != 8:
+            raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR)
+        self._write_frame(Frame(constants.FrameType.PING,
+                                constants.FrameFlag.ACK,
+                                0, frame.data))
 
 
 def _reset_on_error(f):
