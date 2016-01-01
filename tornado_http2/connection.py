@@ -22,7 +22,18 @@ class Params(object):
         self.decompress = decompress
 
 
-Frame = collections.namedtuple('Frame', ['type', 'flags', 'stream_id', 'data'])
+class Frame(collections.namedtuple(
+        'Frame', ['type', 'flags', 'stream_id', 'data'])):
+    def without_padding(self):
+        """Returns a new Frame, equal to this one with any padding removed."""
+        if self.flags & constants.FrameFlag.PADDED:
+            pad_len, = struct.unpack('>b', self.data[:1])
+            if pad_len > (len(self.data)-1):
+                raise StreamError(self.stream_id,
+                                  constants.ErrorCode.PROTOCOL_ERROR)
+            data = self.data[1:-pad_len]
+            return Frame(self.type, self.flags, self.stream_id, data)
+        return self
 
 
 class ConnectionError(Exception):
@@ -167,7 +178,9 @@ class Connection(object):
         elif frame.type == constants.FrameType.PING:
             self._handle_ping_frame(frame)
         else:
-            raise Exception("invalid frame type %s for stream 0", frame.type)
+            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                  "invalid frame type %s for stream 0" %
+                                  frame.type)
 
     def _write_frame(self, frame):
         logging.debug('sending frame %r', frame)
@@ -336,6 +349,7 @@ class Stream(object):
             self.finish_future.set_result(None)
 
     def _handle_data_frame(self, frame):
+        frame = frame.without_padding()
         if frame.data and self._delegate_started:
             self.delegate.data_received(frame.data)
         if frame.flags & constants.FrameFlag.END_STREAM:
