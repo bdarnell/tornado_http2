@@ -103,6 +103,10 @@ class Connection(object):
                         self.streams[frame.stream_id].handle_frame(frame)
                     elif (not self.is_client and
                           frame.type == constants.FrameType.HEADERS):
+                        if (frame.stream_id & 1) == (self.next_stream_id & 1):
+                            # The remote is trying to use our local keyspace
+                            raise ConnectionError(
+                                constants.ErrorCode.PROTOCOL_ERROR)
                         if frame.stream_id > max_remote_stream_id:
                             max_remote_stream_id = frame.stream_id
                         stream = Stream(self, frame.stream_id, None,
