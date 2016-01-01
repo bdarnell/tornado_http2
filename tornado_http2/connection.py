@@ -26,6 +26,7 @@ Frame = collections.namedtuple('Frame', ['type', 'flags', 'stream_id', 'data'])
 
 
 class ConnectionError(Exception):
+    """A protocol-level error which shuts down the entire connection."""
     def __init__(self, code):
         self.code = code
 
@@ -110,6 +111,7 @@ class Connection(object):
                         else:
                             stream.handle_frame(frame)
             except ConnectionError as e:
+                # TODO: set last_stream_id
                 yield self._write_frame(self._goaway_frame(e.code, 0))
                 self.stream.close()
                 return
@@ -155,6 +157,8 @@ class Connection(object):
         # Re-attach a leading 0 to parse 24-bit length with struct.
         header = struct.unpack('>iBBi', b'\0' + header_bytes)
         data_len, typ, flags, stream_id = header
+        if data_len > self._setting(constants.Setting.MAX_FRAME_SIZE):
+            raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR)
         typ = constants.FrameType(typ)
         # Strip the reserved bit off of stream_id
         stream_id = stream_id & 0x7fffffff
@@ -164,6 +168,10 @@ class Connection(object):
     def _goaway_frame(self, error_code, last_stream_id):
         payload = struct.pack('>ii', last_stream_id, error_code.code)
         return Frame(constants.FrameType.GOAWAY, 0, 0, payload)
+
+    def _setting(self, setting):
+        # TODO: respect changed settings.
+        return setting.default
 
     def _settings_frame(self):
         # TODO: parameterize?
