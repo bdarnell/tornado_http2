@@ -10,6 +10,10 @@ def _entry_size(name, value):
     return len(name) + len(value) + 32
 
 
+class HpackError(Exception):
+    pass
+
+
 class HpackDecoder(object):
     def __init__(self, dynamic_table_limit):
         self._dynamic_table = collections.deque()
@@ -17,34 +21,48 @@ class HpackDecoder(object):
         self._dynamic_table_limit = dynamic_table_limit
 
     def decode(self, data):
-        header_list = []
-        bit_decoder = BitDecoder(data)
-        while not bit_decoder.eod():
-            is_indexed = bit_decoder.read_bit()
-            if is_indexed:
-                idx = bit_decoder.read_hpack_int()
-                name, value = self.read_from_index(idx)
-                header_list.append((name, value, HeaderIndexMode.YES))
-            else:
-                add_to_index = bit_decoder.read_bit()
-                if add_to_index:
-                    name, value = self.read_name_value_pair(bit_decoder)
+        try:
+            header_list = []
+            bit_decoder = BitDecoder(data)
+            # RFC 7541 section 4.2: the limit can only be changed at the
+            # start of a block (and only in the first block following
+            # a settings change, although we do not yet enforce this rule).
+            limit_update_allowed = True
+            while not bit_decoder.eod():
+                is_indexed = bit_decoder.read_bit()
+                if is_indexed:
+                    idx = bit_decoder.read_hpack_int()
+                    name, value = self.read_from_index(idx)
                     header_list.append((name, value, HeaderIndexMode.YES))
-                    self.add_to_dynamic_table(name, value)
+                    limit_update_allowed = False
                 else:
-                    is_limit_update = bit_decoder.read_bit()
-                    if is_limit_update:
-                        new_limit = bit_decoder.read_hpack_int()
-                        # TODO: fail if new_limit is higher than old limit.
-                        self._dynamic_table_limit = new_limit
-                        self._gc_dynamic_table()
-                    else:
-                        if bit_decoder.read_bit():
-                            mode = HeaderIndexMode.NEVER
-                        else:
-                            mode = HeaderIndexMode.NO
+                    add_to_index = bit_decoder.read_bit()
+                    if add_to_index:
                         name, value = self.read_name_value_pair(bit_decoder)
-                        header_list.append((name, value, mode))
+                        header_list.append((name, value, HeaderIndexMode.YES))
+                        self.add_to_dynamic_table(name, value)
+                        limit_update_allowed = False
+                    else:
+                        is_limit_update = bit_decoder.read_bit()
+                        if is_limit_update:
+                            if not limit_update_allowed:
+                                # RFC 7541 section 4.2.
+                                raise HpackError("dynamic table change must "
+                                                 "be at start of block")
+                            new_limit = bit_decoder.read_hpack_int()
+                            # TODO: fail if new_limit is higher than old limit.
+                            self._dynamic_table_limit = new_limit
+                            self._gc_dynamic_table()
+                        else:
+                            if bit_decoder.read_bit():
+                                mode = HeaderIndexMode.NEVER
+                            else:
+                                mode = HeaderIndexMode.NO
+                            name, value = self.read_name_value_pair(bit_decoder)
+                            header_list.append((name, value, mode))
+                            limit_update_allowed = False
+        except Exception as e:
+            raise HpackError(str(e))
         return header_list
 
     def read_name_value_pair(self, bit_decoder):

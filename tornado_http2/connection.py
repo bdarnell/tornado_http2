@@ -12,7 +12,7 @@ from tornado.iostream import StreamClosedError
 from tornado.log import gen_log
 
 from . import constants
-from .hpack import HpackDecoder, HpackEncoder
+from .hpack import HpackDecoder, HpackEncoder, HpackError
 
 
 class Params(object):
@@ -266,13 +266,16 @@ class Stream(object):
             data = data[5:]
         pseudo_headers = {}
         headers = HTTPHeaders()
-        for k, v, idx in self.conn.hpack_decoder.decode(bytearray(data)):
-            if k == b":authority":
-                headers.add("Host", native_str(v))
-            if k.startswith(b':'):
-                pseudo_headers[native_str(k)] = native_str(v)
-            else:
-                headers.add(native_str(k),  native_str(v))
+        try:
+            for k, v, idx in self.conn.hpack_decoder.decode(bytearray(data)):
+                if k == b":authority":
+                    headers.add("Host", native_str(v))
+                if k.startswith(b':'):
+                    pseudo_headers[native_str(k)] = native_str(v)
+                else:
+                    headers.add(native_str(k),  native_str(v))
+        except HpackError:
+            raise ConnectionError(constants.ErrorCode.COMPRESSION_ERROR)
         if self.conn.is_client:
             status = int(pseudo_headers[':status'])
             start_line = ResponseStartLine('HTTP/2.0', status, responses.get(status, ''))
