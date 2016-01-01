@@ -29,6 +29,8 @@ class Frame(collections.namedtuple(
         if self.flags & constants.FrameFlag.PADDED:
             pad_len, = struct.unpack('>b', self.data[:1])
             if pad_len > (len(self.data)-1):
+                if self.type == constants.FrameType.HEADERS:
+                    raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR)
                 raise StreamError(self.stream_id,
                                   constants.ErrorCode.PROTOCOL_ERROR)
             data = self.data[1:-pad_len]
@@ -295,6 +297,7 @@ class Stream(object):
     def _handle_headers_frame(self, frame):
         if not (frame.flags & constants.FrameFlag.END_HEADERS):
             raise Exception("Continuation frames not yet supported")
+        frame = frame.without_padding()
         data = frame.data
         if len(data) > self.conn.params.max_header_size:
             if self.conn.is_client:
