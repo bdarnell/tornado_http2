@@ -49,6 +49,8 @@ class Setting(enum.Enum):
     MAX_FRAME_SIZE = (0x5, 16384)
     MAX_HEADER_LIST_SIZE = (0x6, None)
 
+MAX_WINDOW_SIZE = 2**31 - 1
+MAX_MAX_FRAME_SIZE = 2**24 - 1
 
 class ErrorCode(enum.Enum):
     """Constants for HTTP2 error codes.

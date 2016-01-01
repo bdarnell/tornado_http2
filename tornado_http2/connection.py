@@ -228,7 +228,7 @@ class Connection(object):
     def _settings_frame(self):
         # TODO: parameterize?
         if self.is_client:
-            payload = struct.pack('>hi', constants.Setting.ENABLE_PUSH.code, 0)
+            payload = struct.pack('>HI', constants.Setting.ENABLE_PUSH.code, 0)
         else:
             payload = b''
         return Frame(constants.FrameType.SETTINGS, 0, 0, payload)
@@ -239,10 +239,27 @@ class Connection(object):
 
     def _handle_settings_frame(self, frame):
         if frame.flags & constants.FrameFlag.ACK:
+            if frame.data:
+                raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR)
             return
-        else:
+        data = frame.data
+        while data:
+            if len(data) < 6:
+                raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR)
+            code, value = struct.unpack('>HI', data[:6])
+            data = data[6:]
             # TODO: respect changed settings.
-            self._write_frame(self._settings_ack_frame())
+            if code == constants.Setting.ENABLE_PUSH.code:
+                if value not in (0, 1):
+                    raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR)
+            elif code == constants.Setting.INITIAL_WINDOW_SIZE.code:
+                if value > constants.MAX_WINDOW_SIZE:
+                    raise ConnectionError(constants.ErrorCode.FLOW_CONTROL_ERROR)
+            elif code == constants.Setting.MAX_FRAME_SIZE.code:
+                if (value < constants.Setting.MAX_FRAME_SIZE.default or
+                    value > constants.MAX_MAX_FRAME_SIZE):
+                    raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR)
+        self._write_frame(self._settings_ack_frame())
 
     def _handle_ping_frame(self, frame):
         if frame.flags & constants.FrameFlag.ACK:
