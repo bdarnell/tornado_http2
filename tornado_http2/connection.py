@@ -370,6 +370,9 @@ class Stream(object):
                               constants.ErrorCode.FRAME_SIZE_ERROR)
 
     def _handle_rst_stream_frame(self, frame):
+        if len(frame.data) != 4:
+            raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR)
+        # TODO: expose error code?
         if self._delegate_started:
             self.delegate.on_connection_close()
 
