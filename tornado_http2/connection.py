@@ -289,6 +289,8 @@ class Stream(object):
             self._handle_headers_frame(frame)
         elif frame.type == constants.FrameType.DATA:
             self._handle_data_frame(frame)
+        elif frame.type == constants.FrameType.PRIORITY:
+            self._handle_priority_frame(frame)
         elif frame.type == constants.FrameType.RST_STREAM:
             self._handle_rst_stream_frame(frame)
         else:
@@ -360,6 +362,12 @@ class Stream(object):
                 self._delegate_started = False
                 self.delegate.finish()
             self.finish_future.set_result(None)
+
+    def _handle_priority_frame(self, frame):
+        # TODO: implement priority
+        if len(frame.data) != 5:
+            raise StreamError(self.stream_id,
+                              constants.ErrorCode.FRAME_SIZE_ERROR)
 
     def _handle_rst_stream_frame(self, frame):
         if self._delegate_started:
