@@ -96,6 +96,9 @@ class Connection(object):
             while True:
                 try:
                     frame = yield self._read_frame()
+                    if frame is None:
+                        # discard unknown frames
+                        continue
                     logging.debug('got frame %r', frame)
                     if frame.stream_id == 0:
                         self.handle_frame(frame)
@@ -184,10 +187,13 @@ class Connection(object):
         data_len, typ, flags, stream_id = header
         if data_len > self._setting(constants.Setting.MAX_FRAME_SIZE):
             raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR)
-        typ = constants.FrameType(typ)
         # Strip the reserved bit off of stream_id
         stream_id = stream_id & 0x7fffffff
         data = yield self.stream.read_bytes(data_len)
+        try:
+            typ = constants.FrameType(typ)
+        except ValueError:
+            return None
         raise gen.Return(Frame(typ, flags, stream_id, data))
 
     def _goaway_frame(self, error_code, last_stream_id, message):
