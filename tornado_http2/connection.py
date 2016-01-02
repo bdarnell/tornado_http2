@@ -326,7 +326,8 @@ class Stream(object):
         from tornado.util import ObjectDict
         # TODO: remove
         self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close)
-        self._expected_content_remaining = None
+        self._incoming_content_remaining = None
+        self._outgoing_content_remaining = None
         self._delegate_started = False
         # TODO: inherit from connection
         self.flow_window = constants.Setting.INITIAL_WINDOW_SIZE.default
@@ -451,10 +452,8 @@ class Stream(object):
         elif self._phase == constants.HTTPPhase.TRAILERS:
             # TODO: support trailers
             pass
-        if frame.flags & constants.FrameFlag.END_STREAM:
-            self.delegate.finish()
-            self.finish_future.set_result(None)
-        elif self._phase == constants.HTTPPhase.TRAILERS:
+        if (not self._maybe_end_stream(frame.flags) and
+                self._phase == constants.HTTPPhase.TRAILERS):
             # The frame that finishes the trailers must also finish
             # the stream.
             raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
@@ -471,7 +470,14 @@ class Stream(object):
         else:
             start_line = RequestStartLine(pseudo_headers[':method'],
                                           pseudo_headers[':path'], 'HTTP/2.0')
-        self._request_start_line = start_line
+            self._request_start_line = start_line
+
+        if (self.conn.is_client and
+            (self._request_start_line.method == 'HEAD' or
+             start_line.code == 304)):
+            self._incoming_content_remaining = 0
+        elif "content-length" in headers:
+            self._incoming_content_remaining = int(headers["content-length"])
 
         if not self.conn.is_client or status >= 200:
             self._phase = constants.HTTPPhase.BODY
@@ -488,13 +494,25 @@ class Stream(object):
                                   "DATA after trailers")
         self._phase = constants.HTTPPhase.BODY
         frame = frame.without_padding()
+        if self._incoming_content_remaining is not None:
+            self._incoming_content_remaining -= len(frame.data)
+            if self._incoming_content_remaining < 0:
+                raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
         if frame.data and self._delegate_started:
             self.delegate.data_received(frame.data)
-        if frame.flags & constants.FrameFlag.END_STREAM:
+        self._maybe_end_stream(frame.flags)
+
+    def _maybe_end_stream(self, flags):
+        if flags & constants.FrameFlag.END_STREAM:
+            if (self._incoming_content_remaining is not None and
+                    self._incoming_content_remaining != 0):
+                raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
             if self._delegate_started:
                 self._delegate_started = False
                 self.delegate.finish()
             self.finish_future.set_result(None)
+            return True
+        return False
 
     def _handle_priority_frame(self, frame):
         # TODO: implement priority
@@ -531,11 +549,12 @@ class Stream(object):
         if (not self.conn.is_client and
             (self._request_start_line.method == 'HEAD' or
              start_line.code == 304)):
-            self._expected_content_remaining = 0
+            self._outgoing_content_remaining = 0
         elif 'Content-Length' in headers:
-            self._expected_content_remaining = int(headers['Content-Length'])
+            self._outgoing_content_remaining = int(headers['Content-Length'])
         header_list = []
         if self.conn.is_client:
+            self._request_start_line = start_line
             header_list.append((b':method', utf8(start_line.method),
                                 constants.HeaderIndexMode.YES))
             header_list.append((b':scheme', b'https',
@@ -566,9 +585,9 @@ class Stream(object):
     @_reset_on_error
     def write(self, chunk, callback=None):
         if chunk:
-            if self._expected_content_remaining is not None:
-                self._expected_content_remaining -= len(chunk)
-                if self._expected_content_remaining < 0:
+            if self._outgoing_content_remaining is not None:
+                self._outgoing_content_remaining -= len(chunk)
+                if self._outgoing_content_remaining < 0:
                     raise HTTPOutputError(
                         "Tried to write more data than Content-Length")
             self.conn._write_frame(Frame(constants.FrameType.DATA, 0,
@@ -583,11 +602,11 @@ class Stream(object):
 
     @_reset_on_error
     def finish(self):
-        if (self._expected_content_remaining is not None and
-                self._expected_content_remaining != 0):
+        if (self._outgoing_content_remaining is not None and
+                self._outgoing_content_remaining != 0):
             raise HTTPOutputError(
                 "Tried to write %d bytes less than Content-Length" %
-                self._expected_content_remaining)
+                self._outgoing_content_remaining)
         self.conn._write_frame(Frame(constants.FrameType.DATA,
                                      constants.FrameFlag.END_STREAM,
                                      self.stream_id, b''))
