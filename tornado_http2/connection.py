@@ -331,6 +331,7 @@ class Stream(object):
         # TODO: inherit from connection
         self.flow_window = constants.Setting.INITIAL_WINDOW_SIZE.default
         self._header_frames = []
+        self._phase = constants.HTTPPhase.HEADERS
 
     def set_delegate(self, delegate):
         self.orig_delegate = self.delegate = delegate
@@ -364,6 +365,8 @@ class Stream(object):
         return bool(self._header_frames)
 
     def _handle_headers_frame(self, frame):
+        if self._phase == constants.HTTPPhase.BODY:
+            self._phase = constants.HTTPPhase.TRAILERS
         frame = frame.without_padding()
         self._header_frames.append(frame)
         self._check_header_length()
@@ -416,7 +419,9 @@ class Stream(object):
         pseudo_headers = {}
         headers = HTTPHeaders()
         try:
-            has_regular_header = False
+            # Pseudo-headers must come before any regular headers,
+            # and only in the first HEADERS phase.
+            has_regular_header = bool(self._phase == constants.HTTPPhase.TRAILERS)
             for k, v, idx in self.conn.hpack_decoder.decode(bytearray(data)):
                 if k != k.lower():
                     # RFC section 8.1.2
@@ -441,6 +446,20 @@ class Stream(object):
                     has_regular_header = True
         except HpackError:
             raise ConnectionError(constants.ErrorCode.COMPRESSION_ERROR)
+        if self._phase == constants.HTTPPhase.HEADERS:
+            self._start_request(pseudo_headers, headers)
+        elif self._phase == constants.HTTPPhase.TRAILERS:
+            # TODO: support trailers
+            pass
+        if frame.flags & constants.FrameFlag.END_STREAM:
+            self.delegate.finish()
+            self.finish_future.set_result(None)
+        elif self._phase == constants.HTTPPhase.TRAILERS:
+            # The frame that finishes the trailers must also finish
+            # the stream.
+            raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
+
+    def _start_request(self, pseudo_headers, headers):
         if "connection" in headers:
             raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
                                   "connection header should not be present")
@@ -452,16 +471,20 @@ class Stream(object):
                                           pseudo_headers[':path'], 'HTTP/2.0')
         self._request_start_line = start_line
 
+        if not self.conn.is_client or status >= 200:
+            self._phase = constants.HTTPPhase.BODY
+
         self._delegate_started = True
         self.delegate.headers_received(start_line, headers)
-        if frame.flags & constants.FrameFlag.END_STREAM:
-            self.delegate.finish()
-            self.finish_future.set_result(None)
 
     def _handle_data_frame(self, frame):
         if self._header_frames:
             raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
                                   "DATA without END_HEADERS")
+        if self._phase == constants.HTTPPhase.TRAILERS:
+            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                  "DATA after trailers")
+        self._phase = constants.HTTPPhase.BODY
         frame = frame.without_padding()
         if frame.data and self._delegate_started:
             self.delegate.data_received(frame.data)

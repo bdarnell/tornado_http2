@@ -109,3 +109,11 @@ class FrameFlag(enum.IntEnum):
     END_HEADERS = 0x4  # HEADERS, PUSH_PROMISE, CONTINUATION
     PADDED = 0x8  # DATA, HEADERS, PUSH_PROMISE
     PRIORITY = 0x20  # HEADERS
+
+
+class HTTPPhase(enum.Enum):
+    """High-level state of an HTTP stream.
+    """
+    HEADERS = 1
+    BODY = 2
+    TRAILERS = 3
