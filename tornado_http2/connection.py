@@ -347,15 +347,33 @@ class Stream(object):
         pseudo_headers = {}
         headers = HTTPHeaders()
         try:
+            has_regular_header = False
             for k, v, idx in self.conn.hpack_decoder.decode(bytearray(data)):
-                if k == b":authority":
-                    headers.add("Host", native_str(v))
+                if k != k.lower():
+                    # RFC section 8.1.2
+                    raise StreamError(self.stream_id,
+                                      constants.ErrorCode.PROTOCOL_ERROR)
                 if k.startswith(b':'):
+                    if self.conn.is_client:
+                        valid_pseudo_headers = (b':status',)
+                    else:
+                        valid_pseudo_headers = (b':method', b':scheme',
+                                                b':authority', b':path')
+                    if (has_regular_header or
+                            k not in valid_pseudo_headers or
+                            native_str(k) in pseudo_headers):
+                        raise StreamError(self.stream_id,
+                                          constants.ErrorCode.PROTOCOL_ERROR)
                     pseudo_headers[native_str(k)] = native_str(v)
+                    if k == b":authority":
+                        headers.add("Host", native_str(v))
                 else:
                     headers.add(native_str(k),  native_str(v))
+                    has_regular_header = True
         except HpackError:
             raise ConnectionError(constants.ErrorCode.COMPRESSION_ERROR)
+        if "connection" in headers:
+            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR)
         if self.conn.is_client:
             status = int(pseudo_headers[':status'])
             start_line = ResponseStartLine('HTTP/2.0', status, responses.get(status, ''))

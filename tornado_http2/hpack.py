@@ -72,7 +72,6 @@ class HpackDecoder(object):
         else:
             name = self.read_from_index(name_index)[0]
         value = self.read_string(bit_decoder)
-        assert name == name.lower(), 'headers must be lowercase'
         return name, value
 
     def read_string(self, bit_decoder):
