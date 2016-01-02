@@ -1,18 +1,19 @@
-import collections
 import logging
 import struct
 
 from tornado.concurrent import Future
-from tornado.escape import native_str, utf8
+from tornado.escape import utf8
 from tornado import gen
-from tornado.http1connection import _GzipMessageDelegate
-from tornado.httputil import HTTPHeaders, RequestStartLine, ResponseStartLine, responses, HTTPOutputError
+from tornado.httputil import HTTPOutputError
 from tornado.ioloop import IOLoop
 from tornado.iostream import StreamClosedError
 from tornado.log import gen_log
 
 from . import constants
-from .hpack import HpackDecoder, HpackEncoder, HpackError
+from .errors import ConnectionError, StreamError
+from .frames import Frame, parse_window_update_frame
+from .hpack import HpackDecoder, HpackEncoder
+from .stream import Stream
 
 
 class Params(object):
@@ -20,37 +21,6 @@ class Params(object):
         self.chunk_size = chunk_size or 65536
         self.max_header_size = max_header_size or 65536
         self.decompress = decompress
-
-
-class Frame(collections.namedtuple(
-        'Frame', ['type', 'flags', 'stream_id', 'data'])):
-    def without_padding(self):
-        """Returns a new Frame, equal to this one with any padding removed."""
-        if self.flags & constants.FrameFlag.PADDED:
-            pad_len, = struct.unpack('>b', self.data[:1])
-            if pad_len > (len(self.data)-1):
-                if self.type == constants.FrameType.HEADERS:
-                    raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
-                                          "invalid padding length")
-                raise StreamError(self.stream_id,
-                                  constants.ErrorCode.PROTOCOL_ERROR)
-            data = self.data[1:-pad_len]
-            return Frame(self.type, self.flags, self.stream_id, data)
-        return self
-
-
-class ConnectionError(Exception):
-    """A protocol-level error which shuts down the entire connection."""
-    def __init__(self, code, message=None):
-        self.code = code
-        self.message = message
-
-
-class StreamError(Exception):
-    """An error which terminates a stream but leaves the connection intact."""
-    def __init__(self, stream_id, code):
-        self.stream_id = stream_id
-        self.code = code
 
 
 class Connection(object):
@@ -133,7 +103,7 @@ class Connection(object):
                         if frame.stream_id > max_remote_stream_id:
                             max_remote_stream_id = frame.stream_id
                         stream = Stream(self, frame.stream_id, None,
-                                             context=self.context)
+                                        context=self.context)
                         stream.set_delegate(delegate.start_request(self, stream))
                         self.streams[frame.stream_id] = stream
                         last_stream = stream
@@ -281,13 +251,13 @@ class Connection(object):
                         "INITIAL_WINDOW_SIZE too large")
             elif code == constants.Setting.MAX_FRAME_SIZE.code:
                 if (value < constants.Setting.MAX_FRAME_SIZE.default or
-                    value > constants.MAX_MAX_FRAME_SIZE):
+                        value > constants.MAX_MAX_FRAME_SIZE):
                     raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
                                           "MAX_FRAME_SIZE out of bounds")
         self._write_frame(self._settings_ack_frame())
 
     def _handle_window_update_frame(self, frame):
-        window_update = _parse_window_update_frame(frame)
+        window_update = parse_window_update_frame(frame)
         if window_update == 0:
             raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
                                   "window update must not be zero")
@@ -304,328 +274,3 @@ class Connection(object):
         self._write_frame(Frame(constants.FrameType.PING,
                                 constants.FrameFlag.ACK,
                                 0, frame.data))
-
-
-def _reset_on_error(f):
-    def wrapper(self, *args, **kw):
-        try:
-            return f(self, *args, **kw)
-        except Exception:
-            self.reset()
-            raise
-    return wrapper
-
-
-class Stream(object):
-    def __init__(self, conn, stream_id, delegate, context=None):
-        self.conn = conn
-        self.stream_id = stream_id
-        self.set_delegate(delegate)
-        self.context = context
-        self.finish_future = Future()
-        from tornado.util import ObjectDict
-        # TODO: remove
-        self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close)
-        self._incoming_content_remaining = None
-        self._outgoing_content_remaining = None
-        self._delegate_started = False
-        # TODO: inherit from connection
-        self.flow_window = constants.Setting.INITIAL_WINDOW_SIZE.default
-        self._header_frames = []
-        self._phase = constants.HTTPPhase.HEADERS
-
-    def set_delegate(self, delegate):
-        self.orig_delegate = self.delegate = delegate
-        if self.conn.params.decompress:
-            self.delegate = _GzipMessageDelegate(delegate, self.conn.params.chunk_size)
-
-    def handle_frame(self, frame):
-        if self.finish_future.done():
-            raise StreamError(self.stream_id, constants.ErrorCode.STREAM_CLOSED)
-
-        if frame.type == constants.FrameType.HEADERS:
-            self._handle_headers_frame(frame)
-        elif frame.type == constants.FrameType.CONTINUATION:
-            self._handle_continuation_frame(frame)
-        elif frame.type == constants.FrameType.DATA:
-            self._handle_data_frame(frame)
-        elif frame.type == constants.FrameType.PRIORITY:
-            self._handle_priority_frame(frame)
-        elif frame.type == constants.FrameType.RST_STREAM:
-            self._handle_rst_stream_frame(frame)
-        elif frame.type == constants.FrameType.WINDOW_UPDATE:
-            self._handle_window_update_frame(frame)
-        elif frame.type in (constants.FrameType.SETTINGS,
-                            constants.FrameType.GOAWAY,
-                            constants.FrameType.PUSH_PROMISE):
-            raise Exception("invalid frame type %s for stream", frame.type)
-        # Unknown frame types are silently discarded, unless they break
-        # the rule that nothing can come between HEADERS and CONTINUATION.
-
-    def needs_continuation(self):
-        return bool(self._header_frames)
-
-    def _handle_headers_frame(self, frame):
-        if self._phase == constants.HTTPPhase.BODY:
-            self._phase = constants.HTTPPhase.TRAILERS
-        frame = frame.without_padding()
-        self._header_frames.append(frame)
-        self._check_header_length()
-        if frame.flags & constants.FrameFlag.END_HEADERS:
-            self._parse_headers()
-
-    def _handle_continuation_frame(self, frame):
-        if not self._header_frames:
-            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
-                                  "CONTINUATION without HEADERS")
-        self._header_frames.append(frame)
-        self._check_header_length()
-        if frame.flags & constants.FrameFlag.END_HEADERS:
-            self._parse_headers()
-
-    def _check_header_length(self):
-        if (sum(len(f.data) for f in self._header_frames) >
-                self.conn.params.max_header_size):
-            if self.conn.is_client:
-                # TODO: Need tests for client side of headers-too-large.
-                # What's the best way to send an error?
-                self.delegate.on_connection_close()
-            else:
-                # write_headers needs a start line so it can tell
-                # whether this is a HEAD or not. If we're rejecting
-                # the headers we can't know so just make something up.
-                # Note that this means the error response body MUST be
-                # zero bytes so it doesn't matter whether the client
-                # sent a HEAD or a GET.
-                self._request_start_line = RequestStartLine('GET', '/', 'HTTP/2.0')
-                start_line = ResponseStartLine('HTTP/2.0', 431, 'Headers too large')
-                self.write_headers(start_line, HTTPHeaders())
-                self.finish()
-            return
-
-    def _parse_headers(self):
-        frame = self._header_frames[0]
-        data = b''.join(f.data for f in self._header_frames)
-        self._header_frames = []
-        if frame.flags & constants.FrameFlag.PRIORITY:
-            # TODO: support PRIORITY and PADDING.
-            # This is just enough to cover an error case tested in h2spec.
-            stream_dep, weight = struct.unpack('>ib', data[:5])
-            data = data[5:]
-            # strip off the "exclusive" bit
-            stream_dep = stream_dep & 0x7fffffff
-            if stream_dep == frame.stream_id:
-                raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
-                                      "stream cannot depend on itself")
-        pseudo_headers = {}
-        headers = HTTPHeaders()
-        try:
-            # Pseudo-headers must come before any regular headers,
-            # and only in the first HEADERS phase.
-            has_regular_header = bool(self._phase == constants.HTTPPhase.TRAILERS)
-            for k, v, idx in self.conn.hpack_decoder.decode(bytearray(data)):
-                if k != k.lower():
-                    # RFC section 8.1.2
-                    raise StreamError(self.stream_id,
-                                      constants.ErrorCode.PROTOCOL_ERROR)
-                if k.startswith(b':'):
-                    if self.conn.is_client:
-                        valid_pseudo_headers = (b':status',)
-                    else:
-                        valid_pseudo_headers = (b':method', b':scheme',
-                                                b':authority', b':path')
-                    if (has_regular_header or
-                            k not in valid_pseudo_headers or
-                            native_str(k) in pseudo_headers):
-                        raise StreamError(self.stream_id,
-                                          constants.ErrorCode.PROTOCOL_ERROR)
-                    pseudo_headers[native_str(k)] = native_str(v)
-                    if k == b":authority":
-                        headers.add("Host", native_str(v))
-                else:
-                    headers.add(native_str(k),  native_str(v))
-                    has_regular_header = True
-        except HpackError:
-            raise ConnectionError(constants.ErrorCode.COMPRESSION_ERROR)
-        if self._phase == constants.HTTPPhase.HEADERS:
-            self._start_request(pseudo_headers, headers)
-        elif self._phase == constants.HTTPPhase.TRAILERS:
-            # TODO: support trailers
-            pass
-        if (not self._maybe_end_stream(frame.flags) and
-                self._phase == constants.HTTPPhase.TRAILERS):
-            # The frame that finishes the trailers must also finish
-            # the stream.
-            raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
-
-    def _start_request(self, pseudo_headers, headers):
-        if "connection" in headers:
-            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
-                                  "connection header should not be present")
-        if "te" in headers and headers["te"] != "trailers":
-            raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
-        if self.conn.is_client:
-            status = int(pseudo_headers[':status'])
-            start_line = ResponseStartLine('HTTP/2.0', status, responses.get(status, ''))
-        else:
-            for k in (':method', ':scheme', ':path'):
-                if k not in pseudo_headers:
-                    raise StreamError(self.stream_id,
-                                      constants.ErrorCode.PROTOCOL_ERROR)
-            start_line = RequestStartLine(pseudo_headers[':method'],
-                                          pseudo_headers[':path'], 'HTTP/2.0')
-            self._request_start_line = start_line
-
-        if (self.conn.is_client and
-            (self._request_start_line.method == 'HEAD' or
-             start_line.code == 304)):
-            self._incoming_content_remaining = 0
-        elif "content-length" in headers:
-            self._incoming_content_remaining = int(headers["content-length"])
-
-        if not self.conn.is_client or status >= 200:
-            self._phase = constants.HTTPPhase.BODY
-
-        self._delegate_started = True
-        self.delegate.headers_received(start_line, headers)
-
-    def _handle_data_frame(self, frame):
-        if self._header_frames:
-            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
-                                  "DATA without END_HEADERS")
-        if self._phase == constants.HTTPPhase.TRAILERS:
-            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
-                                  "DATA after trailers")
-        self._phase = constants.HTTPPhase.BODY
-        frame = frame.without_padding()
-        if self._incoming_content_remaining is not None:
-            self._incoming_content_remaining -= len(frame.data)
-            if self._incoming_content_remaining < 0:
-                raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
-        if frame.data and self._delegate_started:
-            self.delegate.data_received(frame.data)
-        self._maybe_end_stream(frame.flags)
-
-    def _maybe_end_stream(self, flags):
-        if flags & constants.FrameFlag.END_STREAM:
-            if (self._incoming_content_remaining is not None and
-                    self._incoming_content_remaining != 0):
-                raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
-            if self._delegate_started:
-                self._delegate_started = False
-                self.delegate.finish()
-            self.finish_future.set_result(None)
-            return True
-        return False
-
-    def _handle_priority_frame(self, frame):
-        # TODO: implement priority
-        if len(frame.data) != 5:
-            raise StreamError(self.stream_id,
-                              constants.ErrorCode.FRAME_SIZE_ERROR)
-
-    def _handle_rst_stream_frame(self, frame):
-        if len(frame.data) != 4:
-            raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR)
-        # TODO: expose error code?
-        if self._delegate_started:
-            self.delegate.on_connection_close()
-
-    def _handle_window_update_frame(self, frame):
-        # TODO: handle stream window update
-        window_update = _parse_window_update_frame(frame)
-        if window_update == 0:
-            raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
-        self.flow_window += window_update
-        if self.flow_window > constants.MAX_WINDOW_SIZE:
-            raise StreamError(self.stream_id, constants.ErrorCode.FLOW_CONTROL_ERROR)
-
-    def set_close_callback(self, callback):
-        # TODO: this shouldn't be necessary
-        pass
-
-    def reset(self):
-        self.conn._write_frame(Frame(constants.FrameType.RST_STREAM,
-                                     0, self.stream_id, b'\x00\x00\x00\x00'))
-
-    @_reset_on_error
-    def write_headers(self, start_line, headers, chunk=None, callback=None):
-        if (not self.conn.is_client and
-            (self._request_start_line.method == 'HEAD' or
-             start_line.code == 304)):
-            self._outgoing_content_remaining = 0
-        elif 'Content-Length' in headers:
-            self._outgoing_content_remaining = int(headers['Content-Length'])
-        header_list = []
-        if self.conn.is_client:
-            self._request_start_line = start_line
-            header_list.append((b':method', utf8(start_line.method),
-                                constants.HeaderIndexMode.YES))
-            header_list.append((b':scheme', b'https',
-                                constants.HeaderIndexMode.YES))
-            header_list.append((b':path', utf8(start_line.path),
-                                constants.HeaderIndexMode.NO))
-        else:
-            header_list.append((b':status', utf8(str(start_line.code)),
-                                constants.HeaderIndexMode.YES))
-        for k, v in headers.get_all():
-            k = utf8(k.lower())
-            if k == b"connection":
-                # Remove the implicit "connection: close", which is not
-                # allowed in http2.
-                # TODO: move the responsibility for this from httpclient
-                # to http1connection?
-                continue
-            header_list.append((k, utf8(v),
-                                constants.HeaderIndexMode.YES))
-        data = bytes(self.conn.hpack_encoder.encode(header_list))
-        frame = Frame(constants.FrameType.HEADERS,
-                      constants.FrameFlag.END_HEADERS, self.stream_id,
-                      data)
-        self.conn._write_frame(frame)
-
-        return self.write(chunk, callback=callback)
-
-    @_reset_on_error
-    def write(self, chunk, callback=None):
-        if chunk:
-            if self._outgoing_content_remaining is not None:
-                self._outgoing_content_remaining -= len(chunk)
-                if self._outgoing_content_remaining < 0:
-                    raise HTTPOutputError(
-                        "Tried to write more data than Content-Length")
-            self.conn._write_frame(Frame(constants.FrameType.DATA, 0,
-                                         self.stream_id, chunk))
-        # TODO: flow control
-        if callback is not None:
-            callback()
-        else:
-            future = Future()
-            future.set_result(None)
-            return future
-
-    @_reset_on_error
-    def finish(self):
-        if (self._outgoing_content_remaining is not None and
-                self._outgoing_content_remaining != 0):
-            raise HTTPOutputError(
-                "Tried to write %d bytes less than Content-Length" %
-                self._outgoing_content_remaining)
-        self.conn._write_frame(Frame(constants.FrameType.DATA,
-                                     constants.FrameFlag.END_STREAM,
-                                     self.stream_id, b''))
-
-    def read_response(self, delegate):
-        assert delegate is self.orig_delegate, 'cannot change delegate'
-        return self.finish_future
-
-
-def _parse_window_update_frame(frame):
-    try:
-        window_update, = struct.unpack('>I', frame.data)
-    except struct.error:
-        raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR,
-                              "WINDOW_UPDATE incorrect size")
-    # strip reserved bit
-    window_update = window_update & 0x7fffffff
-    return window_update
