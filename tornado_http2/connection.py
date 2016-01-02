@@ -70,6 +70,7 @@ class Connection(object):
             constants.Setting.HEADER_TABLE_SIZE.default)
         self.hpack_encoder = HpackEncoder(
             constants.Setting.HEADER_TABLE_SIZE.default)
+        self.flow_window = constants.Setting.INITIAL_WINDOW_SIZE.default
 
     @gen.coroutine
     def close(self):
@@ -182,8 +183,7 @@ class Connection(object):
         if frame.type == constants.FrameType.SETTINGS:
             self._handle_settings_frame(frame)
         elif frame.type == constants.FrameType.WINDOW_UPDATE:
-            # TODO: handle WINDOW_UPDATE
-            pass
+            self._handle_window_update_frame(frame)
         elif frame.type == constants.FrameType.PING:
             self._handle_ping_frame(frame)
         elif frame.type == constants.FrameType.GOAWAY:
@@ -279,6 +279,16 @@ class Connection(object):
                                           "MAX_FRAME_SIZE out of bounds")
         self._write_frame(self._settings_ack_frame())
 
+    def _handle_window_update_frame(self, frame):
+        window_update = _parse_window_update_frame(frame)
+        if window_update == 0:
+            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                  "window update must not be zero")
+        self.flow_window += window_update
+        if self.flow_window > constants.MAX_WINDOW_SIZE:
+            raise ConnectionError(constants.ErrorCode.FLOW_CONTROL_ERROR,
+                                  "connection flow control limit too high")
+
     def _handle_ping_frame(self, frame):
         if frame.flags & constants.FrameFlag.ACK:
             return
@@ -311,6 +321,8 @@ class Stream(object):
         self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close)
         self._expected_content_remaining = None
         self._delegate_started = False
+        # TODO: inherit from connection
+        self.flow_window = constants.Setting.INITIAL_WINDOW_SIZE.default
 
     def set_delegate(self, delegate):
         self.orig_delegate = self.delegate = delegate
@@ -328,6 +340,8 @@ class Stream(object):
             self._handle_priority_frame(frame)
         elif frame.type == constants.FrameType.RST_STREAM:
             self._handle_rst_stream_frame(frame)
+        elif frame.type == constants.FrameType.WINDOW_UPDATE:
+            self._handle_window_update_frame(frame)
         else:
             raise Exception("invalid frame type %s", frame.type)
 
@@ -431,6 +445,15 @@ class Stream(object):
         if self._delegate_started:
             self.delegate.on_connection_close()
 
+    def _handle_window_update_frame(self, frame):
+        # TODO: handle stream window update
+        window_update = _parse_window_update_frame(frame)
+        if window_update == 0:
+            raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
+        self.flow_window += window_update
+        if self.flow_window > constants.MAX_WINDOW_SIZE:
+            raise StreamError(self.stream_id, constants.ErrorCode.FLOW_CONTROL_ERROR)
+
     def set_close_callback(self, callback):
         # TODO: this shouldn't be necessary
         pass
@@ -508,3 +531,14 @@ class Stream(object):
     def read_response(self, delegate):
         assert delegate is self.orig_delegate, 'cannot change delegate'
         return self.finish_future
+
+
+def _parse_window_update_frame(frame):
+    try:
+        window_update, = struct.unpack('>I', frame.data)
+    except struct.error:
+        raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR,
+                              "WINDOW_UPDATE incorrect size")
+    # strip reserved bit
+    window_update = window_update & 0x7fffffff
+    return window_update
