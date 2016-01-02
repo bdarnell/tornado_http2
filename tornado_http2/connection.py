@@ -30,7 +30,8 @@ class Frame(collections.namedtuple(
             pad_len, = struct.unpack('>b', self.data[:1])
             if pad_len > (len(self.data)-1):
                 if self.type == constants.FrameType.HEADERS:
-                    raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR)
+                    raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                          "invalid padding length")
                 raise StreamError(self.stream_id,
                                   constants.ErrorCode.PROTOCOL_ERROR)
             data = self.data[1:-pad_len]
@@ -122,7 +123,8 @@ class Connection(object):
                         if (frame.stream_id & 1) == (self.next_stream_id & 1):
                             # The remote is trying to use our local keyspace
                             raise ConnectionError(
-                                constants.ErrorCode.PROTOCOL_ERROR)
+                                constants.ErrorCode.PROTOCOL_ERROR,
+                                "invalid stream id")
                         if frame.stream_id > max_remote_stream_id:
                             max_remote_stream_id = frame.stream_id
                         stream = Stream(self, frame.stream_id, None,
@@ -146,7 +148,8 @@ class Connection(object):
                                 constants.ErrorCode.STREAM_CLOSED)
                         else:
                             raise ConnectionError(
-                                constants.ErrorCode.PROTOCOL_ERROR)
+                                constants.ErrorCode.PROTOCOL_ERROR,
+                                "non-existent stream")
                 except StreamError as e:
                     yield self._write_frame(self._rst_stream_frame(
                         e.stream_id, e.code))
@@ -161,6 +164,10 @@ class Connection(object):
             # stream because the IOLoop is going away too.
             return
         except StreamClosedError:
+            return
+        except HTTPOutputError:
+            # TODO: should these be caught somewhere else?
+            self.stream.close()
             return
         except:
             gen_log.error("closing stream due to uncaught exception",
@@ -179,6 +186,10 @@ class Connection(object):
             pass
         elif frame.type == constants.FrameType.PING:
             self._handle_ping_frame(frame)
+        elif frame.type == constants.FrameType.GOAWAY:
+            self.stream.close()
+            # TODO: shut down all open streams.
+            raise StreamClosedError()
         else:
             raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
                                   "invalid frame type %s for stream 0" %
@@ -208,7 +219,7 @@ class Connection(object):
         try:
             typ = constants.FrameType(typ)
         except ValueError:
-            return None
+            raise gen.Return(None)
         raise gen.Return(Frame(typ, flags, stream_id, data))
 
     def _goaway_frame(self, error_code, last_stream_id, message):
@@ -240,25 +251,32 @@ class Connection(object):
     def _handle_settings_frame(self, frame):
         if frame.flags & constants.FrameFlag.ACK:
             if frame.data:
-                raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR)
+                raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR,
+                                      "SETTINGS ACK must be empty")
             return
         data = frame.data
         while data:
             if len(data) < 6:
-                raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR)
+                raise ConnectionError(
+                    constants.ErrorCode.FRAME_SIZE_ERROR,
+                    "SETTINGS frames must be multiples of 6 bytes")
             code, value = struct.unpack('>HI', data[:6])
             data = data[6:]
             # TODO: respect changed settings.
             if code == constants.Setting.ENABLE_PUSH.code:
                 if value not in (0, 1):
-                    raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR)
+                    raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                          "ENABLE_PUSH must be 0 or 1")
             elif code == constants.Setting.INITIAL_WINDOW_SIZE.code:
                 if value > constants.MAX_WINDOW_SIZE:
-                    raise ConnectionError(constants.ErrorCode.FLOW_CONTROL_ERROR)
+                    raise ConnectionError(
+                        constants.ErrorCode.FLOW_CONTROL_ERROR,
+                        "INITIAL_WINDOW_SIZE too large")
             elif code == constants.Setting.MAX_FRAME_SIZE.code:
                 if (value < constants.Setting.MAX_FRAME_SIZE.default or
                     value > constants.MAX_MAX_FRAME_SIZE):
-                    raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR)
+                    raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                          "MAX_FRAME_SIZE out of bounds")
         self._write_frame(self._settings_ack_frame())
 
     def _handle_ping_frame(self, frame):
@@ -343,7 +361,8 @@ class Stream(object):
             # strip off the "exclusive" bit
             stream_dep = stream_dep & 0x7fffffff
             if stream_dep == frame.stream_id:
-                raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR)
+                raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                      "stream cannot depend on itself")
         pseudo_headers = {}
         headers = HTTPHeaders()
         try:
@@ -373,7 +392,8 @@ class Stream(object):
         except HpackError:
             raise ConnectionError(constants.ErrorCode.COMPRESSION_ERROR)
         if "connection" in headers:
-            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR)
+            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                  "connection header should not be present")
         if self.conn.is_client:
             status = int(pseudo_headers[':status'])
             start_line = ResponseStartLine('HTTP/2.0', status, responses.get(status, ''))
@@ -439,7 +459,14 @@ class Stream(object):
             header_list.append((b':status', utf8(str(start_line.code)),
                                 constants.HeaderIndexMode.YES))
         for k, v in headers.get_all():
-            header_list.append((utf8(k.lower()), utf8(v),
+            k = utf8(k.lower())
+            if k == b"connection":
+                # Remove the implicit "connection: close", which is not
+                # allowed in http2.
+                # TODO: move the responsibility for this from httpclient
+                # to http1connection?
+                continue
+            header_list.append((k, utf8(v),
                                 constants.HeaderIndexMode.YES))
         data = bytes(self.conn.hpack_encoder.encode(header_list))
         frame = Frame(constants.FrameType.HEADERS,
