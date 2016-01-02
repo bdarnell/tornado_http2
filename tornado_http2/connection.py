@@ -463,6 +463,8 @@ class Stream(object):
         if "connection" in headers:
             raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
                                   "connection header should not be present")
+        if "te" in headers and headers["te"] != "trailers":
+            raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
         if self.conn.is_client:
             status = int(pseudo_headers[':status'])
             start_line = ResponseStartLine('HTTP/2.0', status, responses.get(status, ''))
