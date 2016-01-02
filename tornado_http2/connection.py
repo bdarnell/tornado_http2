@@ -108,17 +108,21 @@ class Connection(object):
             self._write_frame(self._settings_frame())
             self._initial_settings_written.set_result(None)
             max_remote_stream_id = 0
+            last_stream = None
             while True:
                 try:
                     frame = yield self._read_frame()
-                    if frame is None:
-                        # discard unknown frames
-                        continue
                     logging.debug('got frame %r', frame)
+                    if last_stream is not None and last_stream.needs_continuation():
+                        if (frame.type != constants.FrameType.CONTINUATION or
+                                frame.stream_id != last_stream.stream_id):
+                            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                                  "CONTINUATION frame required")
                     if frame.stream_id == 0:
                         self.handle_frame(frame)
                     elif frame.stream_id in self.streams:
-                        self.streams[frame.stream_id].handle_frame(frame)
+                        last_stream = self.streams[frame.stream_id]
+                        last_stream.handle_frame(frame)
                     elif (not self.is_client and
                           frame.type == constants.FrameType.HEADERS):
                         if (frame.stream_id & 1) == (self.next_stream_id & 1):
@@ -129,9 +133,10 @@ class Connection(object):
                         if frame.stream_id > max_remote_stream_id:
                             max_remote_stream_id = frame.stream_id
                         stream = Stream(self, frame.stream_id, None,
-                                        context=self.context)
+                                             context=self.context)
                         stream.set_delegate(delegate.start_request(self, stream))
                         self.streams[frame.stream_id] = stream
+                        last_stream = stream
                         stream.handle_frame(frame)
                     else:
                         # We don't have the stream and can't create it.
@@ -190,10 +195,16 @@ class Connection(object):
             self.stream.close()
             # TODO: shut down all open streams.
             raise StreamClosedError()
-        else:
+        elif frame.type in (constants.FrameType.DATA,
+                            constants.FrameType.HEADERS,
+                            constants.FrameType.PRIORITY,
+                            constants.FrameType.RST_STREAM,
+                            constants.FrameType.PUSH_PROMISE,
+                            constants.FrameType.CONTINUATION):
             raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
                                   "invalid frame type %s for stream 0" %
                                   frame.type)
+        # Unknown frame types are silently discarded.
 
     def _write_frame(self, frame):
         logging.debug('sending frame %r', frame)
@@ -216,10 +227,6 @@ class Connection(object):
         # Strip the reserved bit off of stream_id
         stream_id = stream_id & 0x7fffffff
         data = yield self.stream.read_bytes(data_len)
-        try:
-            typ = constants.FrameType(typ)
-        except ValueError:
-            raise gen.Return(None)
         raise gen.Return(Frame(typ, flags, stream_id, data))
 
     def _goaway_frame(self, error_code, last_stream_id, message):
@@ -323,6 +330,7 @@ class Stream(object):
         self._delegate_started = False
         # TODO: inherit from connection
         self.flow_window = constants.Setting.INITIAL_WINDOW_SIZE.default
+        self._header_frames = []
 
     def set_delegate(self, delegate):
         self.orig_delegate = self.delegate = delegate
@@ -332,8 +340,11 @@ class Stream(object):
     def handle_frame(self, frame):
         if self.finish_future.done():
             raise StreamError(self.stream_id, constants.ErrorCode.STREAM_CLOSED)
+
         if frame.type == constants.FrameType.HEADERS:
             self._handle_headers_frame(frame)
+        elif frame.type == constants.FrameType.CONTINUATION:
+            self._handle_continuation_frame(frame)
         elif frame.type == constants.FrameType.DATA:
             self._handle_data_frame(frame)
         elif frame.type == constants.FrameType.PRIORITY:
@@ -342,15 +353,35 @@ class Stream(object):
             self._handle_rst_stream_frame(frame)
         elif frame.type == constants.FrameType.WINDOW_UPDATE:
             self._handle_window_update_frame(frame)
-        else:
-            raise Exception("invalid frame type %s", frame.type)
+        elif frame.type in (constants.FrameType.SETTINGS,
+                            constants.FrameType.GOAWAY,
+                            constants.FrameType.PUSH_PROMISE):
+            raise Exception("invalid frame type %s for stream", frame.type)
+        # Unknown frame types are silently discarded, unless they break
+        # the rule that nothing can come between HEADERS and CONTINUATION.
+
+    def needs_continuation(self):
+        return bool(self._header_frames)
 
     def _handle_headers_frame(self, frame):
-        if not (frame.flags & constants.FrameFlag.END_HEADERS):
-            raise Exception("Continuation frames not yet supported")
         frame = frame.without_padding()
-        data = frame.data
-        if len(data) > self.conn.params.max_header_size:
+        self._header_frames.append(frame)
+        self._check_header_length()
+        if frame.flags & constants.FrameFlag.END_HEADERS:
+            self._parse_headers()
+
+    def _handle_continuation_frame(self, frame):
+        if not self._header_frames:
+            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                  "CONTINUATION without HEADERS")
+        self._header_frames.append(frame)
+        self._check_header_length()
+        if frame.flags & constants.FrameFlag.END_HEADERS:
+            self._parse_headers()
+
+    def _check_header_length(self):
+        if (sum(len(f.data) for f in self._header_frames) >
+                self.conn.params.max_header_size):
             if self.conn.is_client:
                 # TODO: Need tests for client side of headers-too-large.
                 # What's the best way to send an error?
@@ -367,6 +398,11 @@ class Stream(object):
                 self.write_headers(start_line, HTTPHeaders())
                 self.finish()
             return
+
+    def _parse_headers(self):
+        frame = self._header_frames[0]
+        data = b''.join(f.data for f in self._header_frames)
+        self._header_frames = []
         if frame.flags & constants.FrameFlag.PRIORITY:
             # TODO: support PRIORITY and PADDING.
             # This is just enough to cover an error case tested in h2spec.
@@ -423,6 +459,9 @@ class Stream(object):
             self.finish_future.set_result(None)
 
     def _handle_data_frame(self, frame):
+        if self._header_frames:
+            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                  "DATA without END_HEADERS")
         frame = frame.without_padding()
         if frame.data and self._delegate_started:
             self.delegate.data_received(frame.data)

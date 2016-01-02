@@ -14,7 +14,7 @@ HTTP2_CLEAR = "h2c"
 CLIENT_PREFACE = binascii.a2b_hex("505249202a20485454502f322e300d0a0d0a534d0d0a0d0a")
 
 
-class FrameType(enum.Enum):
+class FrameType(enum.IntEnum):
     """Constants for HTTP2 frame types.
 
     Defined in
