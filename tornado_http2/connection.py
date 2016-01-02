@@ -468,6 +468,10 @@ class Stream(object):
             status = int(pseudo_headers[':status'])
             start_line = ResponseStartLine('HTTP/2.0', status, responses.get(status, ''))
         else:
+            for k in (':method', ':scheme', ':path'):
+                if k not in pseudo_headers:
+                    raise StreamError(self.stream_id,
+                                      constants.ErrorCode.PROTOCOL_ERROR)
             start_line = RequestStartLine(pseudo_headers[':method'],
                                           pseudo_headers[':path'], 'HTTP/2.0')
             self._request_start_line = start_line
