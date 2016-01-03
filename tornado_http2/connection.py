@@ -11,6 +11,7 @@ from tornado.log import gen_log
 
 from . import constants
 from .errors import ConnectionError, StreamError
+from .flow_control import Window
 from .frames import Frame, parse_window_update_frame
 from .hpack import HpackDecoder, HpackEncoder
 from .stream import Stream
@@ -33,6 +34,7 @@ class Connection(object):
         self.context = context
         self._initial_settings_written = Future()
         self._serving_future = None
+        self._settings = {}
 
         self.streams = {}
         self.next_stream_id = 1 if is_client else 2
@@ -40,7 +42,8 @@ class Connection(object):
             constants.Setting.HEADER_TABLE_SIZE.default)
         self.hpack_encoder = HpackEncoder(
             constants.Setting.HEADER_TABLE_SIZE.default)
-        self.flow_window = constants.Setting.INITIAL_WINDOW_SIZE.default
+        self.window = Window(None, None,
+                             constants.Setting.INITIAL_WINDOW_SIZE.default)
 
     @gen.coroutine
     def close(self):
@@ -119,9 +122,12 @@ class Connection(object):
                         else:
                             max_stream_id = max_remote_stream_id
                         if frame.stream_id <= max_stream_id:
-                            raise StreamError(
-                                frame.stream_id,
-                                constants.ErrorCode.STREAM_CLOSED)
+                            if frame.type not in (
+                                constants.FrameType.WINDOW_UPDATE,
+                                constants.FrameType.RST_STREAM):
+                                raise StreamError(
+                                    frame.stream_id,
+                                    constants.ErrorCode.STREAM_CLOSED)
                         else:
                             raise ConnectionError(
                                 constants.ErrorCode.PROTOCOL_ERROR,
@@ -192,8 +198,12 @@ class Connection(object):
         # Re-attach a leading 0 to parse 24-bit length with struct.
         header = struct.unpack('>iBBi', b'\0' + header_bytes)
         data_len, typ, flags, stream_id = header
-        if data_len > self._setting(constants.Setting.MAX_FRAME_SIZE):
+        if data_len > self.setting(constants.Setting.MAX_FRAME_SIZE):
             raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR)
+        try:
+            typ = constants.FrameType(typ)
+        except ValueError:
+            pass
         # Strip the reserved bit off of stream_id
         stream_id = stream_id & 0x7fffffff
         data = yield self.stream.read_bytes(data_len)
@@ -209,9 +219,8 @@ class Connection(object):
         payload = struct.pack('>i', error_code.code)
         return Frame(constants.FrameType.RST_STREAM, 0, stream_id, payload)
 
-    def _setting(self, setting):
-        # TODO: respect changed settings.
-        return setting.default
+    def setting(self, setting):
+        return self._settings.get(setting.code, setting.default)
 
     def _settings_frame(self):
         # TODO: parameterize?
@@ -249,22 +258,17 @@ class Connection(object):
                     raise ConnectionError(
                         constants.ErrorCode.FLOW_CONTROL_ERROR,
                         "INITIAL_WINDOW_SIZE too large")
+                # TODO: propagate delta to all open streams
             elif code == constants.Setting.MAX_FRAME_SIZE.code:
                 if (value < constants.Setting.MAX_FRAME_SIZE.default or
                         value > constants.MAX_MAX_FRAME_SIZE):
                     raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
                                           "MAX_FRAME_SIZE out of bounds")
+            self._settings[code] = value
         self._write_frame(self._settings_ack_frame())
 
     def _handle_window_update_frame(self, frame):
-        window_update = parse_window_update_frame(frame)
-        if window_update == 0:
-            raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
-                                  "window update must not be zero")
-        self.flow_window += window_update
-        if self.flow_window > constants.MAX_WINDOW_SIZE:
-            raise ConnectionError(constants.ErrorCode.FLOW_CONTROL_ERROR,
-                                  "connection flow control limit too high")
+        self.window.apply_window_update(frame)
 
     def _handle_ping_frame(self, frame):
         if frame.flags & constants.FrameFlag.ACK:

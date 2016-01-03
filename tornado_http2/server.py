@@ -164,6 +164,7 @@ class _UpgradingConnection(HTTPConnection):
         self.server._connections.add(h2_conn)
         h2_conn.start(self.server)
         self.conn = Stream(h2_conn, 1, None, context=self.context)
+        h2_conn.streams[1] = self.conn
         self.conn._request_start_line = RequestStartLine(
             self._request_start_line.method,
             self._request_start_line.path,

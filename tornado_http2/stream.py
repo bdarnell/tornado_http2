@@ -1,13 +1,17 @@
+import functools
 import struct
 
 from tornado.concurrent import Future
 from tornado.escape import native_str, utf8
+from tornado import gen
 from tornado.http1connection import _GzipMessageDelegate
 from tornado.httputil import HTTPHeaders, HTTPOutputError, RequestStartLine, ResponseStartLine, responses
 from tornado.ioloop import IOLoop
+from tornado.locks import Lock
 
 from . import constants
 from .errors import ConnectionError, StreamError
+from .flow_control import Window
 from .frames import Frame, parse_window_update_frame
 from .hpack import HpackError
 
@@ -29,14 +33,15 @@ class Stream(object):
         self.set_delegate(delegate)
         self.context = context
         self.finish_future = Future()
+        self.write_lock = Lock()
         from tornado.util import ObjectDict
         # TODO: remove
         self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close)
         self._incoming_content_remaining = None
         self._outgoing_content_remaining = None
         self._delegate_started = False
-        # TODO: inherit from connection
-        self.flow_window = constants.Setting.INITIAL_WINDOW_SIZE.default
+        self.window = Window(conn.window, stream_id,
+                             conn.setting(constants.Setting.INITIAL_WINDOW_SIZE))
         self._header_frames = []
         self._phase = constants.HTTPPhase.HEADERS
 
@@ -46,6 +51,20 @@ class Stream(object):
             self.delegate = _GzipMessageDelegate(delegate, self.conn.params.chunk_size)
 
     def handle_frame(self, frame):
+        if frame.type == constants.FrameType.PRIORITY:
+            self._handle_priority_frame(frame)
+            return
+        elif frame.type == constants.FrameType.RST_STREAM:
+            self._handle_rst_stream_frame(frame)
+            return
+        elif frame.type == constants.FrameType.WINDOW_UPDATE:
+            self._handle_window_update_frame(frame)
+            return
+        elif frame.type in (constants.FrameType.SETTINGS,
+                            constants.FrameType.GOAWAY,
+                            constants.FrameType.PUSH_PROMISE):
+            raise Exception("invalid frame type %s for stream", frame.type)
+
         if self.finish_future.done():
             raise StreamError(self.stream_id, constants.ErrorCode.STREAM_CLOSED)
 
@@ -55,16 +74,6 @@ class Stream(object):
             self._handle_continuation_frame(frame)
         elif frame.type == constants.FrameType.DATA:
             self._handle_data_frame(frame)
-        elif frame.type == constants.FrameType.PRIORITY:
-            self._handle_priority_frame(frame)
-        elif frame.type == constants.FrameType.RST_STREAM:
-            self._handle_rst_stream_frame(frame)
-        elif frame.type == constants.FrameType.WINDOW_UPDATE:
-            self._handle_window_update_frame(frame)
-        elif frame.type in (constants.FrameType.SETTINGS,
-                            constants.FrameType.GOAWAY,
-                            constants.FrameType.PUSH_PROMISE):
-            raise Exception("invalid frame type %s for stream", frame.type)
         # Unknown frame types are silently discarded, unless they break
         # the rule that nothing can come between HEADERS and CONTINUATION.
 
@@ -209,8 +218,20 @@ class Stream(object):
             if self._incoming_content_remaining < 0:
                 raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
         if frame.data and self._delegate_started:
-            self.delegate.data_received(frame.data)
+            future = self.delegate.data_received(frame.data)
+            if future is None:
+                self._send_window_update(len(frame.data))
+            else:
+                IOLoop.current().add_future(
+                    future, lambda f: self._send_window_update(len(frame.data)))
         self._maybe_end_stream(frame.flags)
+
+    def _send_window_update(self, amount):
+        encoded = struct.pack('>I', amount)
+        for stream_id in (0, self.stream_id):
+            self.conn._write_frame(Frame(
+                constants.FrameType.WINDOW_UPDATE, 0,
+                stream_id, encoded))
 
     def _maybe_end_stream(self, flags):
         if flags & constants.FrameFlag.END_STREAM:
@@ -238,13 +259,7 @@ class Stream(object):
             self.delegate.on_connection_close()
 
     def _handle_window_update_frame(self, frame):
-        # TODO: handle stream window update
-        window_update = parse_window_update_frame(frame)
-        if window_update == 0:
-            raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
-        self.flow_window += window_update
-        if self.flow_window > constants.MAX_WINDOW_SIZE:
-            raise StreamError(self.stream_id, constants.ErrorCode.FLOW_CONTROL_ERROR)
+        self.window.apply_window_update(frame)
 
     def set_close_callback(self, callback):
         # TODO: this shouldn't be necessary
@@ -290,7 +305,7 @@ class Stream(object):
                       data)
         self.conn._write_frame(frame)
 
-        return self.write(chunk, callback=callback)
+        return self.write(chunk, callback)
 
     @_reset_on_error
     def write(self, chunk, callback=None):
@@ -300,15 +315,26 @@ class Stream(object):
                 if self._outgoing_content_remaining < 0:
                     raise HTTPOutputError(
                         "Tried to write more data than Content-Length")
-            self.conn._write_frame(Frame(constants.FrameType.DATA, 0,
-                                         self.stream_id, chunk))
-        # TODO: flow control
-        if callback is not None:
-            callback()
-        else:
-            future = Future()
-            future.set_result(None)
-            return future
+        return self._write_chunk(chunk, callback)
+
+    @gen.coroutine
+    def _write_chunk(self, chunk, callback=None):
+        try:
+            if chunk:
+                yield self.write_lock.acquire()
+                while chunk:
+                    allowance = yield self.window.consume(len(chunk))
+
+                    yield self.conn._write_frame(
+                        Frame(constants.FrameType.DATA, 0,
+                              self.stream_id, chunk[:allowance]))
+                    chunk = chunk[allowance:]
+                self.write_lock.release()
+            if callback is not None:
+                callback()
+        except Exception:
+            self.reset()
+            raise
 
     @_reset_on_error
     def finish(self):
@@ -317,9 +343,22 @@ class Stream(object):
             raise HTTPOutputError(
                 "Tried to write %d bytes less than Content-Length" %
                 self._outgoing_content_remaining)
-        self.conn._write_frame(Frame(constants.FrameType.DATA,
-                                     constants.FrameFlag.END_STREAM,
-                                     self.stream_id, b''))
+        return self._write_end_stream()
+
+    @gen.coroutine
+    def _write_end_stream(self):
+        # Callers are not required to wait for write() before calling finish,
+        # so we must manually lock.
+        yield self.write_lock.acquire()
+        try:
+            self.conn._write_frame(Frame(constants.FrameType.DATA,
+                                         constants.FrameFlag.END_STREAM,
+                                         self.stream_id, b''))
+        except Exception:
+            self.reset()
+            raise
+        finally:
+            self.write_lock.release()
 
     def read_response(self, delegate):
         assert delegate is self.orig_delegate, 'cannot change delegate'

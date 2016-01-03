@@ -6,7 +6,7 @@ from unittest import skipIf
 from tornado.options import define, options
 from tornado.process import Subprocess
 from tornado.testing import gen_test
-from tornado.web import Application
+from tornado.web import Application, RequestHandler
 
 from tornado_http2.test.util import AsyncHTTP2TestCase
 
@@ -23,6 +23,7 @@ cmd github.com/summerwind/h2spec/cmd/h2spec
 github.com/summerwind/h2spec c4e383421fb7fd265f5c5e3392341e301f86ff67
 golang.org/x/net 0cb26f788dd4625d1956c6fd97ffc4c90669d129
 """
+
 
 @skipIf("H2SPEC_GOPATH" not in os.environ,
         "H2SpecTest only run when H2SPEC_GOPATH is set")
@@ -46,7 +47,14 @@ class H2SpecTest(AsyncHTTP2TestCase):
         self.h2spec_path = os.path.join(env["GOPATH"], "bin", "h2spec")
 
     def get_app(self):
-        return Application()
+        # h2spec cares very little about the server it's talking to:
+        # It is just concerned with the low-level framing so a server that
+        # returns nothing but 404s is fine. However, its flow control
+        # test is only executed if a request for / has a non-empty body.
+        class HelloHandler(RequestHandler):
+            def get(self):
+                self.write("Hello, world")
+        return Application([('/', HelloHandler)])
 
     # This encapsulates a lot of tests, and when things are failing
     # it can take a while to run, so give it a longer timeout.
