@@ -1,15 +1,20 @@
+import os.path
+import ssl
+
 from tornado import gen
+from tornado.httpclient import AsyncHTTPClient
 from tornado.web import RequestHandler, Application
 
 from tornado_http2.test.util import AsyncHTTP2TestCase
 
 
+class HelloHandler(RequestHandler):
+    def get(self):
+        self.write('Hello %s' % self.request.version)
+
+
 class ServerTest(AsyncHTTP2TestCase):
     def get_app(self):
-        class HelloHandler(RequestHandler):
-            def get(self):
-                self.write('hello')
-
         class LargeResponseHandler(RequestHandler):
             @gen.coroutine
             def get(self):
@@ -25,7 +30,7 @@ class ServerTest(AsyncHTTP2TestCase):
     def test_hello(self):
         resp = self.fetch('/hello')
         resp.rethrow()
-        self.assertEqual(resp.body, b'hello')
+        self.assertEqual(resp.body, b'Hello HTTP/2.0')
 
     def test_large_response(self):
         # This mainly tests that WINDOW_UPDATE frames are sent as needed,
@@ -33,3 +38,29 @@ class ServerTest(AsyncHTTP2TestCase):
         resp = self.fetch('/large')
         resp.rethrow()
         self.assertEqual(len(resp.body), 200 * 1024)
+
+
+class HTTPSTest(AsyncHTTP2TestCase):
+    def get_app(self):
+        return Application([
+            ('/hello', HelloHandler),
+        ])
+
+    def get_http_client(self):
+        return AsyncHTTPClient(io_loop=self.io_loop, force_instance=True,
+                               defaults=dict(validate_cert=False))
+
+    def get_protocol(self):
+        return 'https'
+
+    def get_httpserver_options(self):
+        module_dir = os.path.dirname(__file__)
+        ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_ctx.load_cert_chain(os.path.join(module_dir, 'test.crt'),
+                                os.path.join(module_dir, 'test.key'))
+        return dict(ssl_options=ssl_ctx)
+
+    def test_hello(self):
+        resp = self.fetch('/hello')
+        resp.rethrow()
+        self.assertEqual(resp.body, b'Hello HTTP/2.0')

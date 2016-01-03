@@ -32,14 +32,14 @@ class _HTTP2ClientConnection(_HTTPConnection):
         if options is not None:
             if isinstance(options, dict):
                 options = ssl_options_to_context(options)
-            options.set_npn_protocols([constants.HTTP2_TLS])
+            options.set_alpn_protocols([constants.HTTP2_TLS])
         return options
 
     def _create_connection(self, stream):
         can_http2 = False
         if isinstance(stream, SSLIOStream):
             assert stream.socket.cipher() is not None, 'handshake incomplete'
-            proto = stream.socket.selected_npn_protocol()
+            proto = stream.socket.selected_alpn_protocol()
             if proto == constants.HTTP2_TLS:
                 can_http2 = True
         elif self.client._use_http2_cleartext():

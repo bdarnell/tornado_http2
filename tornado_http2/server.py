@@ -21,7 +21,7 @@ class Server(HTTPServer):
                 if 'certfile' not in ssl_options:
                     raise KeyError('missing key "certfile" in ssl_options')
                 ssl_options = ssl_options_to_context(ssl_options)
-            ssl_options.set_npn_protocols([constants.HTTP2_TLS])
+            ssl_options.set_alpn_protocols([constants.HTTP2_TLS])
         # TODO: add h2-specific parameters like frame size instead of header size.
         self.http2_params = Params(
             max_header_size=kwargs.get('max_header_size'),
@@ -44,7 +44,7 @@ class Server(HTTPServer):
         if isinstance(stream, SSLIOStream):
             assert stream.socket.cipher(), 'handshake incomplete'
             # TODO: alpn when available
-            proto = stream.socket.selected_npn_protocol()
+            proto = stream.socket.selected_alpn_protocol()
             if proto == constants.HTTP2_TLS:
                 self._start_http2(stream, address)
                 return
