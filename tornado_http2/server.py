@@ -2,8 +2,8 @@ import functools
 
 from tornado.escape import utf8
 from tornado import gen
-from tornado.httpserver import HTTPServer, _HTTPRequestContext, _ServerRequestAdapter
-from tornado.httputil import HTTPConnection, RequestStartLine
+from tornado.httpserver import HTTPServer, _HTTPRequestContext
+from tornado.httputil import HTTPConnection, RequestStartLine, HTTPMessageDelegate
 from tornado.ioloop import IOLoop
 from tornado.iostream import SSLIOStream, StreamClosedError, UnsatisfiableReadError
 from tornado.log import app_log
@@ -81,7 +81,7 @@ class CleartextHTTP2Server(Server):
                     stream.close()
                     return
             # TODO: make this less hacky
-            stream._read_buffer.appendleft(header_data)
+            stream._read_buffer[:0] = header_data
             stream._read_buffer_size += len(header_data)
             if header_data == b'PRI * HTTP/2.0\r\n\r\n':
                 self._start_http2(stream, address)
@@ -91,7 +91,11 @@ class CleartextHTTP2Server(Server):
             pass
 
     def start_request(self, server_conn, request_conn):
-        return _UpgradingRequestAdapter(self, server_conn, request_conn)
+        request_conn = _UpgradingConnection(request_conn,
+                                            self.http2_params,
+                                            self)
+        delegate = super(CleartextHTTP2Server, self).start_request(server_conn, request_conn)
+        return _UpgradingRequestAdapter(request_conn, delegate)
 
 
 class _UpgradingConnection(HTTPConnection):
@@ -193,13 +197,10 @@ class _UpgradingConnection(HTTPConnection):
             self.conn.reset()
 
 
-class _UpgradingRequestAdapter(_ServerRequestAdapter):
-    def __init__(self, server, server_conn, request_conn):
-        request_conn = _UpgradingConnection(request_conn,
-                                            server.http2_params,
-                                            server)
-        super(_UpgradingRequestAdapter, self).__init__(
-            server, server_conn, request_conn)
+class _UpgradingRequestAdapter(HTTPMessageDelegate):
+    def __init__(self, connection, delegate):
+        self.connection = connection
+        self.delegate = delegate
 
     def headers_received(self, start_line, headers):
         if 'Upgrade' in headers:
@@ -209,12 +210,17 @@ class _UpgradingRequestAdapter(_ServerRequestAdapter):
                 start_line = RequestStartLine(
                     start_line.method, start_line.path, 'HTTP/2.0')
         self.connection._request_start_line = start_line
-        super(_UpgradingRequestAdapter, self).headers_received(
-            start_line, headers)
+        return self.delegate.headers_received(start_line, headers)
+
+    def data_received(self, chunk):
+        return self.delegate.data_received(chunk)
 
     def finish(self):
-        finish = super(_UpgradingRequestAdapter, self).finish
+        finish = self.delegate.finish
         if self.connection.upgrading:
             self.connection.switch_protocols(finish)
         else:
             finish()
+
+    def on_connection_close(self):
+        self.delegate.on_connection_close()

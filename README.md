@@ -10,7 +10,7 @@ Installation
 
     pip install git+https://github.com/bdarnell/tornado_http2.git
 
-This package has only been tested with Tornado 4.3 on Python 2.7.10+ and 3.5.
+This package has only been tested with Tornado 4.5 on Python 2.7.10+ and 3.5.
 
 Server-side usage
 -----------------
