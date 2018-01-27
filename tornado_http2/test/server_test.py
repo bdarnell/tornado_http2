@@ -47,7 +47,7 @@ class HTTPSTest(AsyncHTTP2TestCase):
         ])
 
     def get_http_client(self):
-        return AsyncHTTPClient(io_loop=self.io_loop, force_instance=True,
+        return AsyncHTTPClient(force_instance=True,
                                defaults=dict(validate_cert=False))
 
     def get_protocol(self):
