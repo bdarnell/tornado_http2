@@ -1,0 +1,40 @@
+dist: trusty
+sudo: false
+
+language: python
+python:
+  - 2.7
+  - 3.5
+  - 3.6
+env:
+  - TORNADO_VERSION=4.5.3
+  - TORNADO_VERSION=5.0a1
+
+install:
+  # Use conda because travis has an old version of openssl without ALPN.
+  # Copied from https://conda.io/docs/user-guide/tasks/use-conda-with-travis-ci.html
+  - sudo apt-get update
+  - if [[ "$TRAVIS_PYTHON_VERSION" == "2.7" ]]; then
+      wget https://repo.continuum.io/miniconda/Miniconda2-latest-Linux-x86_64.sh -O miniconda.sh;
+    else
+      wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh;
+    fi
+  - bash miniconda.sh -b -p $HOME/miniconda
+  - export PATH="$HOME/miniconda/bin:$PATH"
+  - hash -r
+  - conda config --set always_yes yes --set changeps1 no
+  - conda update -q conda
+  - conda info -a
+
+  # TODO: figure out how to install a version of libcurl that supports http2
+  - conda create -q -n test-environment python=$TRAVIS_PYTHON_VERSION
+  - source activate test-environment
+  - pip install tornado==$TORNADO_VERSION
+  - python setup.py install
+
+script:
+  - python -m tornado_http2.test.runtests
+  #- python -m tornado_http2.test.runtests --httpclient=tornado_http2.curl.CurlAsyncHTTP2Client
+  - python -m tornado.test --httpserver=tornado_http2.server.CleartextHTTP2Server --httpclient=tornado_http2.client.ForceHTTP2Client
+  #- python -m tornado.test --httpserver=tornado_http2.server.CleartextHTTP2Server --httpclient=tornado_http2.curl.CurlAsyncHTTP2Client
+  - H2SPEC_GOPATH=~/go python -m tornado_http2.test.runtests tornado_http2.test.h2spec_test
