@@ -258,7 +258,10 @@ class Connection(object):
                     raise ConnectionError(
                         constants.ErrorCode.FLOW_CONTROL_ERROR,
                         "INITIAL_WINDOW_SIZE too large")
-                # TODO: propagate delta to all open streams
+                # propagate delta to all open streams
+                delta = value - self.setting(constants.Setting.INITIAL_WINDOW_SIZE)
+                for stream in self.streams.values():
+                    stream.window.adjust(delta)
             elif code == constants.Setting.MAX_FRAME_SIZE.code:
                 if (value < constants.Setting.MAX_FRAME_SIZE.default or
                         value > constants.MAX_MAX_FRAME_SIZE):
