@@ -11,8 +11,11 @@ version = '0.0.1'
 
 kwargs = {}
 
+with open('README.md') as f:
+    kwargs['long_description'] = f.read()
+
 if setuptools is not None:
-    kwargs['install_requires'] = ['tornado>=4.3']
+    kwargs['install_requires'] = ['tornado>=4.5']
 
     if sys.version_info < (3, 4):
         kwargs['install_requires'].append('enum34')
@@ -31,4 +34,14 @@ setup(
             'test.key',
         ],
     },
+    license="http://www.apache.org/licenses/LICENSE-2.0",
+    description="HTTP/2 add-ons for Tornado",
+    classifiers=[
+        'License :: OSI Approved :: Apache Software License',
+        'Programming Language :: Python :: 2',
+        'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3.5',
+        'Programming Language :: Python :: 3.6',
+    ],
     **kwargs)
