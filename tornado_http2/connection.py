@@ -35,7 +35,6 @@ class Connection(object):
         self._initial_settings_written = Future()
         self._serving_future = None
         self._settings = {}
-
         self.streams = {}
         self.next_stream_id = 1 if is_client else 2
         self.hpack_decoder = HpackDecoder(
