@@ -2,6 +2,7 @@ import unittest
 
 from tornado_http2.encoding import BitEncoder, BitDecoder, EODError
 
+
 class TestData(object):
     def __init__(self, *args):
         self.args = args
@@ -14,6 +15,7 @@ class TestData(object):
         for arg in self.args:
             test.assertEqual(self.decode_value(decoder), arg)
 
+
 class Bits(TestData):
     def encode_value(self, encoder, arg):
         encoder.write_bit(arg)
@@ -21,12 +23,14 @@ class Bits(TestData):
     def decode_value(self, decoder):
         return decoder.read_bit()
 
+
 class HpackInt(TestData):
     def encode_value(self, encoder, arg):
         encoder.write_hpack_int(arg)
 
     def decode_value(self, decoder):
         return decoder.read_hpack_int()
+
 
 class HuffChar(TestData):
     def __init__(self, data):
@@ -38,6 +42,7 @@ class HuffChar(TestData):
 
     def decode_value(self, decoder):
         return decoder.read_huffman_char(None)
+
 
 test_data = [
     ('1-bit', [Bits(1)], [0b10000000], False),
@@ -78,7 +83,8 @@ test_data = [
     # Individual huffman-encoded characters
     ('huff1', [HuffChar(b'a')], [0b00011000], False),
     ('huff2', [HuffChar(b'Hi')], [0b11000110, 0b01100000], False),
-    ]
+]
+
 
 class BitEncodingTest(unittest.TestCase):
     def test_bit_encoder(self):
