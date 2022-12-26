@@ -5,4 +5,4 @@ tox==2.1.1
 pluggy==0.3.1
 py==1.10.0
 virtualenv==13.1.2
-wheel==0.26.0
+wheel==0.38.1
