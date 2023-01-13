@@ -16,7 +16,6 @@ from .frames import Frame, parse_window_update_frame
 from .hpack import HpackDecoder, HpackEncoder
 from .stream import Stream
 
-
 class Params(object):
     def __init__(self, chunk_size=None, max_header_size=None, decompress=False):
         self.chunk_size = chunk_size or 65536
@@ -183,14 +182,22 @@ class Connection(object):
         # Unknown frame types are silently discarded.
 
     def _write_frame(self, frame):
-        logging.debug('sending frame %r', frame)
-        # The frame header starts with a 24-bit length. Since `struct`
-        # doesn't support 24-bit ints, encode as 32 and slice off the first
-        # byte.
-        header = struct.pack('>iBBi', len(frame.data), frame.type.value,
-                             frame.flags, frame.stream_id)
-        encoded_frame = header[1:] + frame.data
-        return self.stream.write(encoded_frame)
+        if (frame.type == constants.FrameType.DATA) and len(frame.data):
+            max_size = self.setting(constants.Setting.MAX_FRAME_SIZE)
+            chunks = (
+                frame.data[x:x+max_size]
+                for x in range(0, len(frame.data), max_size)
+            )
+        else:
+            chunks = (frame.data, )
+        for chunk in chunks:
+            # The frame header starts with a 24-bit length. Since `struct`
+            # doesn't support 24-bit ints, encode as 32 and slice off the
+            # first byte.
+            header = struct.pack('>iBBi', len(chunk), frame.type.value,
+                                 frame.flags, frame.stream_id)
+            encoded_frame = header[1:] + chunk
+            self.stream.write(encoded_frame)
 
     @gen.coroutine
     def _read_frame(self):

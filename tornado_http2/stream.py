@@ -227,6 +227,9 @@ class Stream(object):
         self._maybe_end_stream(frame.flags)
 
     def _send_window_update(self, amount):
+        if self.conn.stream.closed():
+            return
+
         encoded = struct.pack('>I', amount)
         for stream_id in (0, self.stream_id):
             self.conn._write_frame(Frame(
