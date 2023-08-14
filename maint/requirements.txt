@@ -1,4 +1,4 @@
-tornado==4.3
+tornado==6.3.3
 tox==2.1.1
 
 # Indirect dependencies.
