@@ -15,16 +15,24 @@ class HelloHandler(RequestHandler):
 
 class ServerTest(AsyncHTTP2TestCase):
     def get_app(self):
-        class LargeResponseHandler(RequestHandler):
+        class LargeChunkedResponseHandler(RequestHandler):
             @gen.coroutine
             def get(self):
                 for i in range(200):
                     self.write(b'a' * 1024)
                     yield self.flush()
 
+        class ExtraLargeResponseHandler(RequestHandler):
+            """Send the data all at once"""
+
+            def get(self):
+                self.write(b'a' * 1024 * 200)
+                self.flush()
+
         return Application([
             ('/hello', HelloHandler),
-            ('/large', LargeResponseHandler),
+            ('/large', LargeChunkedResponseHandler),
+            ('/extralarge', ExtraLargeResponseHandler),
         ])
 
     def test_hello(self):
@@ -32,10 +40,17 @@ class ServerTest(AsyncHTTP2TestCase):
         resp.rethrow()
         self.assertEqual(resp.body, b'Hello HTTP/2.0')
 
-    def test_large_response(self):
+    def test_large_response_chunked(self):
         # This mainly tests that WINDOW_UPDATE frames are sent as needed,
         # since this response exceeds the default 64KB window.
         resp = self.fetch('/large')
+        resp.rethrow()
+        self.assertEqual(len(resp.body), 200 * 1024)
+
+    def test_large_response(self):
+        # This mainly tests that the server will respect the MAX_FRAME_SIZE
+        # when sending data on the connection.
+        resp = self.fetch('/extralarge')
         resp.rethrow()
         self.assertEqual(len(resp.body), 200 * 1024)
 

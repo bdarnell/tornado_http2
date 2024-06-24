@@ -46,7 +46,7 @@ def benchmark(version):
 
 def print_result(label, elapsed):
     print('HTTP/%s: %d requests in %0.3fs: %f QPS' % (label, options.n, elapsed,
-          options.n / elapsed))
+                                                      options.n / elapsed))
 
 
 @gen.coroutine
@@ -57,6 +57,7 @@ def main():
     for version in options.versions:
         elapsed = yield benchmark(int(version))
         print_result(version, elapsed)
+
 
 if __name__ == '__main__':
     IOLoop.current().run_sync(main)

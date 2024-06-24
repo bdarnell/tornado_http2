@@ -323,7 +323,9 @@ class Stream(object):
             if chunk:
                 yield self.write_lock.acquire()
                 while chunk:
-                    allowance = yield self.window.consume(len(chunk))
+                    bytes_to_write = min(len(chunk), self.conn.setting(
+                        constants.Setting.MAX_FRAME_SIZE))
+                    allowance = yield self.window.consume(bytes_to_write)
 
                     yield self.conn._write_frame(
                         Frame(constants.FrameType.DATA, 0,
