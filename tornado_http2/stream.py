@@ -418,14 +418,14 @@ class Stream(object):
                 if self._outgoing_content_remaining < 0:
                     raise HTTPOutputError(
                         "Tried to write more data than Content-Length")
-        future = self._write_chunk(chunk)
-        # Like HTTP1Connection, callers may ignore this future (e.g. when
-        # the connection has been closed), so don't log unretrieved errors.
-        future.add_done_callback(lambda f: f.exception())
+        future = Future()
+        self._write_chunk(chunk, future)
         return future
 
     @gen.coroutine
-    def _write_chunk(self, chunk):
+    def _write_chunk(self, chunk, future):
+        # Errors are reported through `future` rather than this
+        # coroutine's own result.
         try:
             if chunk:
                 yield self.write_lock.acquire()
@@ -442,9 +442,15 @@ class Stream(object):
                         chunk = chunk[allowance:]
                 finally:
                     self.write_lock.release()
-        except Exception:
+        except Exception as e:
             self.reset()
-            raise
+            future.set_exception(e)
+            # Like HTTP1Connection, callers may ignore this future (e.g.
+            # when the connection has been closed), so don't log it as
+            # unretrieved.
+            future.exception()
+        else:
+            future.set_result(None)
 
     @_reset_on_error
     def finish(self):
