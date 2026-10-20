@@ -18,9 +18,11 @@ from .stream import Stream
 
 
 class Params(object):
-    def __init__(self, chunk_size=None, max_header_size=None, decompress=False):
+    def __init__(self, chunk_size=None, max_header_size=None, decompress=False,
+                 max_body_size=None):
         self.chunk_size = chunk_size or 65536
         self.max_header_size = max_header_size or 65536
+        self.max_body_size = max_body_size or 100 * 1024 * 1024
         self.decompress = decompress
 
 
@@ -157,6 +159,8 @@ class Connection(object):
             self.stream.close()
             raise
         finally:
+            for stream in list(self.streams.values()):
+                stream._connection_closed(self.stream.error)
             if delegate is not None:
                 delegate.on_close(self)
 

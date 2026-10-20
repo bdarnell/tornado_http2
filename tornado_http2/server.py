@@ -1,5 +1,6 @@
-import functools
+import ssl
 
+from tornado.concurrent import Future, chain_future
 from tornado.escape import utf8
 from tornado import gen
 from tornado.httpserver import HTTPServer, _HTTPRequestContext
@@ -8,7 +9,6 @@ from tornado.ioloop import IOLoop
 from tornado.iostream import SSLIOStream, StreamClosedError, UnsatisfiableReadError
 from tornado.log import app_log
 from tornado.netutil import ssl_options_to_context
-from tornado import stack_context
 
 from tornado_http2.connection import Connection, Params, Stream
 from tornado_http2 import constants
@@ -20,12 +20,13 @@ class Server(HTTPServer):
             if isinstance(ssl_options, dict):
                 if 'certfile' not in ssl_options:
                     raise KeyError('missing key "certfile" in ssl_options')
-                ssl_options = ssl_options_to_context(ssl_options)
+                ssl_options = ssl_options_to_context(ssl_options, server_side=True)
             ssl_options.set_alpn_protocols([constants.HTTP2_TLS])
         # TODO: add h2-specific parameters like frame size instead of header size.
         self.http2_params = Params(
             max_header_size=kwargs.get('max_header_size'),
             decompress=kwargs.get('decompress_request', False),
+            max_body_size=kwargs.get('max_body_size'),
         )
         super(Server, self).initialize(
             request_callback, ssl_options=ssl_options, **kwargs)
@@ -33,12 +34,16 @@ class Server(HTTPServer):
     def _use_http2_cleartext(self):
         return False
 
+    @gen.coroutine
     def handle_stream(self, stream, address):
         if isinstance(stream, SSLIOStream):
-            stream.wait_for_handshake(
-                functools.partial(self._handle_handshake, stream, address))
-        else:
-            self._handle_handshake(stream, address)
+            try:
+                yield stream.wait_for_handshake()
+            except (StreamClosedError, ssl.SSLError):
+                # The error has already been logged by the IOStream.
+                stream.close()
+                return
+        self._handle_handshake(stream, address)
 
     def _handle_handshake(self, stream, address):
         if isinstance(stream, SSLIOStream):
@@ -54,7 +59,8 @@ class Server(HTTPServer):
         super(Server, self).handle_stream(stream, address)
 
     def _start_http2(self, stream, address):
-        context = _HTTPRequestContext(stream, address, self.protocol)
+        context = _HTTPRequestContext(stream, address, self.protocol,
+                                      self.trusted_downstream)
         conn = Connection(stream, False, params=self.http2_params, context=context)
         self._connections.add(conn)
         conn.start(self)
@@ -114,11 +120,12 @@ class _UpgradingConnection(HTTPConnection):
 
         # TODO: remove
         from tornado.util import ObjectDict
-        self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close)
+        self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close,
+                                 socket=conn.stream.socket)
 
     def set_close_callback(self, callback):
         if self.upgrading:
-            self.close_callback = stack_context.wrap(callback)
+            self.close_callback = callback
         else:
             self.conn.set_close_callback(callback)
 
@@ -137,17 +144,21 @@ class _UpgradingConnection(HTTPConnection):
     def detach(self):
         return self.conn.detach()
 
-    def write_headers(self, start_line, headers, chunk=None, callback=None):
+    def write_headers(self, start_line, headers, chunk=None):
         if self.upgrading:
-            self.written_headers = (start_line, headers, chunk, callback)
+            future = Future()
+            self.written_headers = ((start_line, headers, chunk), future)
+            return future
         else:
-            return self.conn.write_headers(start_line, headers, chunk, callback)
+            return self.conn.write_headers(start_line, headers, chunk)
 
-    def write(self, chunk, callback=None):
+    def write(self, chunk):
         if self.upgrading:
-            self.written_chunks.append((chunk, callback))
+            future = Future()
+            self.written_chunks.append(((chunk,), future))
+            return future
         else:
-            return self.conn.write(chunk, callback)
+            return self.conn.write(chunk)
 
     def finish(self):
         if self.upgrading:
@@ -176,9 +187,10 @@ class _UpgradingConnection(HTTPConnection):
         yield h2_conn._initial_settings_written
 
         if self.written_headers is not None:
-            self.conn.write_headers(*self.written_headers)
-        for write in self.written_chunks:
-            self.conn.write(*write)
+            args, future = self.written_headers
+            chain_future(self.conn.write_headers(*args), future)
+        for args, future in self.written_chunks:
+            chain_future(self.conn.write(*args), future)
         if self.write_finished:
             self.conn.finish()
         if self.max_body_size is not None:

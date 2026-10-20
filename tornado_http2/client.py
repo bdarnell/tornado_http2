@@ -1,8 +1,10 @@
+import ssl
+
 from tornado.httpclient import AsyncHTTPClient, main
 from tornado.ioloop import IOLoop
 from tornado.iostream import SSLIOStream
 from tornado.netutil import ssl_options_to_context
-from tornado.simple_httpclient import SimpleAsyncHTTPClient, _HTTPConnection
+from tornado.simple_httpclient import SimpleAsyncHTTPClient, _HTTPConnection, _client_ssl_defaults
 
 from tornado_http2.connection import Connection, Params
 from tornado_http2 import constants
@@ -31,7 +33,10 @@ class _HTTP2ClientConnection(_HTTPConnection):
         options = super(_HTTP2ClientConnection, self)._get_ssl_options(scheme)
         if options is not None:
             if isinstance(options, dict):
-                options = ssl_options_to_context(options)
+                options = ssl_options_to_context(options, server_side=False)
+            elif options is _client_ssl_defaults:
+                # Don't modify the shared default context.
+                options = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
             options.set_alpn_protocols([constants.HTTP2_TLS])
         return options
 
@@ -45,8 +50,11 @@ class _HTTP2ClientConnection(_HTTPConnection):
         elif self.client._use_http2_cleartext():
             can_http2 = True
         if can_http2:
+            # Connection closes are reported through the HTTP/2 stream.
+            stream.set_close_callback(None)
             conn = Connection(stream, True,
-                              Params(decompress=self.request.decompress_response))
+                              Params(decompress=self.request.decompress_response,
+                                     max_body_size=self.max_body_size))
             IOLoop.current().add_future(conn.start(None),
                                         lambda f: f.result())
             h2_stream = conn.create_stream(self)
