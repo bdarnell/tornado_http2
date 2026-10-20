@@ -54,6 +54,7 @@ class Stream(object):
         self._phase = constants.HTTPPhase.HEADERS
         self._delegate_future = None
         self._aborted = False
+        self._delegate_finished = False
         self._headers_written = False
 
     def set_delegate(self, delegate):
@@ -79,6 +80,8 @@ class Stream(object):
                 result = getattr(self.delegate, method)(*args)
                 if result is not None:
                     yield result
+                if method == 'finish':
+                    self._delegate_finished = True
             except HTTPInputError as e:
                 gen_log.info("Malformed HTTP message from %s: %s",
                              self.context, e)
@@ -111,11 +114,12 @@ class Stream(object):
         self._notify_close()
 
     def _notify_close(self):
-        # A client's delegate must always hear about the close, since it
-        # is waiting for a response. A server's delegate only needs to
-        # once headers_received has been called.
+        # A client's delegate must always hear about the close unless it
+        # has already finished, since it is waiting for a response. A
+        # server's delegate only needs to once headers_received has been
+        # called.
         if self._delegate_started or (self.conn.is_client and
-                                      not self.finish_future.done()):
+                                      not self._delegate_finished):
             self._delegate_started = False
             try:
                 self.delegate.on_connection_close()
@@ -128,6 +132,8 @@ class Stream(object):
         if self.conn.is_client:
             # The client delegate learns about this through read_response.
             self.finish_future.set_exception(StreamClosedError(real_error=error))
+            # Silence the warning if the delegate has stopped waiting.
+            self.finish_future.exception()
         else:
             self._notify_close()
 
@@ -311,6 +317,8 @@ class Stream(object):
         self._maybe_end_stream(frame.flags)
 
     def _send_window_update(self, amount):
+        if self.conn.stream.closed():
+            return
         encoded = struct.pack('>I', amount)
         for stream_id in (0, self.stream_id):
             self.conn._write_frame(Frame(
@@ -349,6 +357,12 @@ class Stream(object):
         pass
 
     def reset(self):
+        if self.conn.stream.closed():
+            return
+        if self.conn.is_client and not self._headers_written:
+            # The stream was never opened, so the server doesn't know
+            # about it. Resetting an idle stream is a connection error.
+            return
         self.conn._write_frame(Frame(constants.FrameType.RST_STREAM,
                                      0, self.stream_id, b'\x00\x00\x00\x00'))
 
@@ -404,27 +418,39 @@ class Stream(object):
                 if self._outgoing_content_remaining < 0:
                     raise HTTPOutputError(
                         "Tried to write more data than Content-Length")
-        return self._write_chunk(chunk)
+        future = Future()
+        self._write_chunk(chunk, future)
+        return future
 
     @gen.coroutine
-    def _write_chunk(self, chunk):
+    def _write_chunk(self, chunk, future):
+        # Errors are reported through `future` rather than this
+        # coroutine's own result.
         try:
             if chunk:
                 yield self.write_lock.acquire()
-                while chunk:
-                    max_frame_size = self.conn.setting(
-                        constants.Setting.MAX_FRAME_SIZE)
-                    allowance = yield self.window.consume(
-                        min(len(chunk), max_frame_size))
+                try:
+                    while chunk:
+                        max_frame_size = self.conn.setting(
+                            constants.Setting.MAX_FRAME_SIZE)
+                        allowance = yield self.window.consume(
+                            min(len(chunk), max_frame_size))
 
-                    yield self.conn._write_frame(
-                        Frame(constants.FrameType.DATA, 0,
-                              self.stream_id, chunk[:allowance]))
-                    chunk = chunk[allowance:]
-                self.write_lock.release()
-        except Exception:
+                        yield self.conn._write_frame(
+                            Frame(constants.FrameType.DATA, 0,
+                                  self.stream_id, chunk[:allowance]))
+                        chunk = chunk[allowance:]
+                finally:
+                    self.write_lock.release()
+        except Exception as e:
             self.reset()
-            raise
+            future.set_exception(e)
+            # Like HTTP1Connection, callers may ignore this future (e.g.
+            # when the connection has been closed), so don't log it as
+            # unretrieved.
+            future.exception()
+        else:
+            future.set_result(None)
 
     @_reset_on_error
     def finish(self):
@@ -444,6 +470,9 @@ class Stream(object):
             self.conn._write_frame(Frame(constants.FrameType.DATA,
                                          constants.FrameFlag.END_STREAM,
                                          self.stream_id, b''))
+        except StreamClosedError:
+            # Nobody waits for finish(), so there is nobody to tell.
+            pass
         except Exception:
             self.reset()
             raise

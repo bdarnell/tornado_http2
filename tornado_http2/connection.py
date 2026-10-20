@@ -139,8 +139,12 @@ class Connection(object):
                         e.stream_id, e.code))
         except ConnectionError as e:
             # TODO: set last_stream_id
-            yield self._write_frame(self._goaway_frame(
-                e.code, 0, e.message))
+            try:
+                yield self._write_frame(self._goaway_frame(
+                    e.code, 0, e.message))
+            except StreamClosedError:
+                # The peer has already gone away.
+                pass
             self.stream.close()
             return
         except GeneratorExit:

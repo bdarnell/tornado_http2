@@ -1,0 +1,33 @@
+name: Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Tornado master requires Python 3.11+. Add 3.10 back when testing
+        # against Tornado 6.5.x.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        client: [native, curl]
+    env:
+      # Tornado's test suite only works over HTTP/2 as of changes that are
+      # not yet in a release. Switch this to Tornado 6.7 (or remove it to
+      # use the default from tox.ini) once 6.7 is released.
+      TORNADO_DEP: "tornado @ git+https://github.com/tornadoweb/tornado.git@master"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install tox
+        run: python -m pip install -r maint/requirements.txt
+      - name: Run tests
+        run: |
+          py=py$(echo "${{ matrix.python-version }}" | tr -d .)
+          tox -e "$py-${{ matrix.client }}-http2,$py-${{ matrix.client }}-tornado"
