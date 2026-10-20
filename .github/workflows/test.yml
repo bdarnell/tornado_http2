@@ -5,29 +5,48 @@ on:
     branches: [master]
   pull_request:
 
+env:
+  # Tornado's test suite only works over HTTP/2 as of changes that are
+  # not yet in a release. Switch this to Tornado 6.7 (or remove it to
+  # use the default from tox.ini) once 6.7 is released.
+  TORNADO_DEP: "tornado @ git+https://github.com/tornadoweb/tornado.git@master"
+  PYTHON_VERSION: "3.15"
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Tornado master requires Python 3.11+. Add 3.10 back when testing
-        # against Tornado 6.5.x.
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
         client: [native, curl]
-    env:
-      # Tornado's test suite only works over HTTP/2 as of changes that are
-      # not yet in a release. Switch this to Tornado 6.7 (or remove it to
-      # use the default from tox.ini) once 6.7 is released.
-      TORNADO_DEP: "tornado @ git+https://github.com/tornadoweb/tornado.git@master"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ env.PYTHON_VERSION }}
       - name: Install tox
         run: python -m pip install -r maint/requirements.txt
       - name: Run tests
         run: |
-          py=py$(echo "${{ matrix.python-version }}" | tr -d .)
+          py=py$(echo "$PYTHON_VERSION" | tr -d .)
           tox -e "$py-${{ matrix.client }}-http2,$py-${{ matrix.client }}-tornado"
+
+  h2spec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install tox
+        run: python -m pip install -r maint/requirements.txt
+      - name: Install h2spec
+        run: |
+          mkdir -p "$RUNNER_TEMP/h2spec"
+          curl -sSfL https://github.com/summerwind/h2spec/releases/download/v2.6.0/h2spec_linux_amd64.tar.gz \
+            | tar xz -C "$RUNNER_TEMP/h2spec"
+          echo "H2SPEC=$RUNNER_TEMP/h2spec/h2spec" >> "$GITHUB_ENV"
+      - name: Run h2spec
+        run: |
+          py=py$(echo "$PYTHON_VERSION" | tr -d .)
+          tox -e "$py-h2spec"

@@ -23,6 +23,17 @@ from .hpack import HpackError
 _FORBIDDEN_HEADER_CHARS_RE = re.compile(br'[\r\n\0]')
 
 
+def check_priority_frame(frame):
+    # TODO: implement priority
+    if len(frame.data) != 5:
+        raise StreamError(frame.stream_id,
+                          constants.ErrorCode.FRAME_SIZE_ERROR)
+    stream_dep, = struct.unpack('>I', frame.data[:4])
+    if stream_dep & 0x7fffffff == frame.stream_id:
+        raise StreamError(frame.stream_id,
+                          constants.ErrorCode.PROTOCOL_ERROR)
+
+
 def _reset_on_error(f):
     def wrapper(self, *args, **kw):
         try:
@@ -56,6 +67,8 @@ class Stream(object):
         self._aborted = False
         self._delegate_finished = False
         self._headers_written = False
+        self._end_stream_written = False
+        self._reset_received = False
 
     def set_delegate(self, delegate):
         self.orig_delegate = self.delegate = delegate
@@ -152,7 +165,13 @@ class Stream(object):
                             constants.FrameType.PUSH_PROMISE):
             raise Exception("invalid frame type %s for stream", frame.type)
 
+        if self._reset_received:
+            raise StreamError(self.stream_id, constants.ErrorCode.STREAM_CLOSED)
         if self.finish_future.done():
+            if self._end_stream_written:
+                # Both sides have closed the stream (RFC 9113 5.1).
+                raise ConnectionError(constants.ErrorCode.STREAM_CLOSED,
+                                      "frame received on closed stream")
             raise StreamError(self.stream_id, constants.ErrorCode.STREAM_CLOSED)
 
         if frame.type == constants.FrameType.HEADERS:
@@ -271,7 +290,7 @@ class Stream(object):
             start_line = ResponseStartLine('HTTP/2.0', status, responses.get(status, ''))
         else:
             for k in (':method', ':scheme', ':path'):
-                if k not in pseudo_headers:
+                if not pseudo_headers.get(k):
                     raise StreamError(self.stream_id,
                                       constants.ErrorCode.PROTOCOL_ERROR)
             start_line = RequestStartLine(pseudo_headers[':method'],
@@ -338,15 +357,13 @@ class Stream(object):
         return False
 
     def _handle_priority_frame(self, frame):
-        # TODO: implement priority
-        if len(frame.data) != 5:
-            raise StreamError(self.stream_id,
-                              constants.ErrorCode.FRAME_SIZE_ERROR)
+        check_priority_frame(frame)
 
     def _handle_rst_stream_frame(self, frame):
         if len(frame.data) != 4:
             raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR)
         # TODO: expose error code?
+        self._reset_received = True
         self._notify_close()
 
     def _handle_window_update_frame(self, frame):
@@ -406,7 +423,12 @@ class Stream(object):
         frame = Frame(constants.FrameType.HEADERS,
                       constants.FrameFlag.END_HEADERS, self.stream_id,
                       data)
-        self.conn._write_frame(frame)
+        try:
+            self.conn._write_frame(frame)
+        except StreamClosedError:
+            # Fall through to write(), which reports the error through
+            # its future like HTTP1Connection does.
+            pass
 
         return self.write(chunk)
 
@@ -470,6 +492,7 @@ class Stream(object):
             self.conn._write_frame(Frame(constants.FrameType.DATA,
                                          constants.FrameFlag.END_STREAM,
                                          self.stream_id, b''))
+            self._end_stream_written = True
         except StreamClosedError:
             # Nobody waits for finish(), so there is nobody to tell.
             pass

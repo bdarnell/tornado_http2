@@ -14,7 +14,7 @@ from .errors import ConnectionError, StreamError
 from .flow_control import Window
 from .frames import Frame, parse_window_update_frame
 from .hpack import HpackDecoder, HpackEncoder
-from .stream import Stream
+from .stream import Stream, check_priority_frame
 
 
 class Params(object):
@@ -78,8 +78,9 @@ class Connection(object):
                 preface = yield self.stream.read_bytes(
                     len(constants.CLIENT_PREFACE))
                 if preface != constants.CLIENT_PREFACE:
-                    raise Exception("expected client preface, got %s" %
-                                    preface)
+                    raise ConnectionError(
+                        constants.ErrorCode.PROTOCOL_ERROR,
+                        "expected client preface, got %r" % preface)
             self._write_frame(self._settings_frame())
             self._initial_settings_written.set_result(None)
             max_remote_stream_id = 0
@@ -93,11 +94,18 @@ class Connection(object):
                                 frame.stream_id != last_stream.stream_id):
                             raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
                                                   "CONTINUATION frame required")
+                    elif frame.type == constants.FrameType.CONTINUATION:
+                        raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                              "unexpected CONTINUATION frame")
                     if frame.stream_id == 0:
                         self.handle_frame(frame)
                     elif frame.stream_id in self.streams:
                         last_stream = self.streams[frame.stream_id]
                         last_stream.handle_frame(frame)
+                    elif frame.type == constants.FrameType.PRIORITY:
+                        # PRIORITY frames may refer to idle or closed
+                        # streams; they don't open a stream.
+                        check_priority_frame(frame)
                     elif (not self.is_client and
                           frame.type == constants.FrameType.HEADERS):
                         if (frame.stream_id & 1) == (self.next_stream_id & 1):
@@ -105,8 +113,12 @@ class Connection(object):
                             raise ConnectionError(
                                 constants.ErrorCode.PROTOCOL_ERROR,
                                 "invalid stream id")
-                        if frame.stream_id > max_remote_stream_id:
-                            max_remote_stream_id = frame.stream_id
+                        if frame.stream_id <= max_remote_stream_id:
+                            # Stream ids must increase (RFC 9113 5.1.1).
+                            raise ConnectionError(
+                                constants.ErrorCode.PROTOCOL_ERROR,
+                                "stream id decreased")
+                        max_remote_stream_id = frame.stream_id
                         stream = Stream(self, frame.stream_id, None,
                                         context=self.context)
                         stream.set_delegate(delegate.start_request(self, stream))
@@ -176,9 +188,12 @@ class Connection(object):
         elif frame.type == constants.FrameType.PING:
             self._handle_ping_frame(frame)
         elif frame.type == constants.FrameType.GOAWAY:
-            self.stream.close()
-            # TODO: shut down all open streams.
-            raise StreamClosedError()
+            if self.is_client:
+                self.stream.close()
+                # TODO: shut down all open streams.
+                raise StreamClosedError()
+            # A server has nothing to do on GOAWAY; the client will
+            # close the connection when it is done with it.
         elif frame.type in (constants.FrameType.DATA,
                             constants.FrameType.HEADERS,
                             constants.FrameType.PRIORITY,
@@ -266,7 +281,17 @@ class Connection(object):
                     raise ConnectionError(
                         constants.ErrorCode.FLOW_CONTROL_ERROR,
                         "INITIAL_WINDOW_SIZE too large")
-                # TODO: propagate delta to all open streams
+                # Adjust the windows of all existing streams by the
+                # difference (RFC 9113 6.9.2). This may make them negative.
+                delta = value - self.setting(
+                    constants.Setting.INITIAL_WINDOW_SIZE)
+                for stream in self.streams.values():
+                    try:
+                        stream.window.adjust(delta)
+                    except StreamError:
+                        raise ConnectionError(
+                            constants.ErrorCode.FLOW_CONTROL_ERROR,
+                            "INITIAL_WINDOW_SIZE change overflowed a window")
             elif code == constants.Setting.MAX_FRAME_SIZE.code:
                 if (value < constants.Setting.MAX_FRAME_SIZE.default or
                         value > constants.MAX_MAX_FRAME_SIZE):

@@ -114,14 +114,23 @@ class BitDecoder(object):
         if limit is None:
             limit = len(self._data)
         tree_node = _huffman_tree
+        bits_read = 0
+        all_ones = True
         while self._byte_offset < limit:
-            tree_node = tree_node[self.read_bit()]
+            bit = self.read_bit()
+            bits_read += 1
+            all_ones = all_ones and bit
+            # The tree contains every symbol except EOS, so a missing
+            # node means the EOS symbol, which must not be decoded.
+            tree_node = tree_node.get(bit)
+            if tree_node is None:
+                raise ValueError("EOS symbol in huffman string")
             if not isinstance(tree_node, dict):
                 return tree_node
-        # End-of-stream.
-        # TODO: it is an error to reach this point if we are not aligned
-        # at the end of a byte or if any of the bits read in this call were
-        # zero. Verify this.
+        # End of the string. Padding must be the most significant bits
+        # of EOS (all ones), and shorter than a byte (RFC 7541 5.2).
+        if bits_read > 7 or not all_ones:
+            raise ValueError("invalid huffman padding")
         return None
 
     def read_char(self):
