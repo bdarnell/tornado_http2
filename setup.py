@@ -1,5 +1,3 @@
-import sys
-
 try:
     import setuptools
     from setuptools import setup
@@ -12,10 +10,8 @@ version = '0.0.1'
 kwargs = {}
 
 if setuptools is not None:
-    kwargs['install_requires'] = ['tornado>=4.3']
-
-    if sys.version_info < (3, 4):
-        kwargs['install_requires'].append('enum34')
+    kwargs['install_requires'] = ['tornado>=6.5.6']
+    kwargs['python_requires'] = '>=3.10'
 
 setup(
     name='tornado_http2',

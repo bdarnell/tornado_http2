@@ -1,19 +1,26 @@
 import functools
+import re
 import struct
 
 from tornado.concurrent import Future
 from tornado.escape import native_str, utf8
 from tornado import gen
-from tornado.http1connection import _GzipMessageDelegate
-from tornado.httputil import HTTPHeaders, HTTPOutputError, RequestStartLine, ResponseStartLine, responses
+from tornado.http1connection import _GzipMessageDelegate, parse_int
+from tornado.httputil import HTTPHeaders, HTTPInputError, HTTPOutputError, RequestStartLine, ResponseStartLine, responses
 from tornado.ioloop import IOLoop
+from tornado.iostream import StreamClosedError
 from tornado.locks import Lock
+from tornado.log import app_log, gen_log
 
 from . import constants
 from .errors import ConnectionError, StreamError
 from .flow_control import Window
 from .frames import Frame, parse_window_update_frame
 from .hpack import HpackError
+
+
+# RFC 9113 section 8.2.1: CR, LF, and NUL are never allowed in field values.
+_FORBIDDEN_HEADER_CHARS_RE = re.compile(br'[\r\n\0]')
 
 
 def _reset_on_error(f):
@@ -36,7 +43,8 @@ class Stream(object):
         self.write_lock = Lock()
         from tornado.util import ObjectDict
         # TODO: remove
-        self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close)
+        self.stream = ObjectDict(io_loop=IOLoop.current(), close=conn.stream.close,
+                                 socket=conn.stream.socket)
         self._incoming_content_remaining = None
         self._outgoing_content_remaining = None
         self._delegate_started = False
@@ -44,11 +52,84 @@ class Stream(object):
                              conn.setting(constants.Setting.INITIAL_WINDOW_SIZE))
         self._header_frames = []
         self._phase = constants.HTTPPhase.HEADERS
+        self._delegate_future = None
+        self._aborted = False
+        self._headers_written = False
 
     def set_delegate(self, delegate):
         self.orig_delegate = self.delegate = delegate
         if self.conn.params.decompress:
-            self.delegate = _GzipMessageDelegate(delegate, self.conn.params.chunk_size)
+            self.delegate = _GzipMessageDelegate(delegate, self.conn.params.chunk_size,
+                                                 self.conn.params.max_body_size)
+
+    def _call_delegate(self, method, *args):
+        # Delegate methods may be coroutines. Run them in order, so that
+        # e.g. data_received doesn't start before headers_received is done.
+        # Errors are handled like HTTP1Connection does, except that only
+        # this stream (not the whole connection) is reset.
+        prev = self._delegate_future
+
+        @gen.coroutine
+        def run():
+            if prev is not None:
+                yield prev
+            if self._aborted:
+                return
+            try:
+                result = getattr(self.delegate, method)(*args)
+                if result is not None:
+                    yield result
+            except HTTPInputError as e:
+                gen_log.info("Malformed HTTP message from %s: %s",
+                             self.context, e)
+                if not self.conn.is_client and not self._headers_written:
+                    self._aborted = True
+                    self._delegate_started = False
+                    self.write_headers(
+                        ResponseStartLine('HTTP/2.0', 400, 'Bad Request'),
+                        HTTPHeaders())
+                    self.finish()
+                else:
+                    self._abort()
+            except Exception:
+                app_log.error("Uncaught exception", exc_info=True)
+                self._abort()
+
+        if prev is not None and prev.done():
+            prev = None
+        future = run()
+        if future.done():
+            # Completed synchronously; no need to chain later calls.
+            return None
+        self._delegate_future = future
+        IOLoop.current().add_future(future, lambda f: f.result())
+        return future
+
+    def _abort(self):
+        self._aborted = True
+        self.reset()
+        self._notify_close()
+
+    def _notify_close(self):
+        # A client's delegate must always hear about the close, since it
+        # is waiting for a response. A server's delegate only needs to
+        # once headers_received has been called.
+        if self._delegate_started or (self.conn.is_client and
+                                      not self.finish_future.done()):
+            self._delegate_started = False
+            try:
+                self.delegate.on_connection_close()
+            except Exception:
+                app_log.error("Uncaught exception", exc_info=True)
+
+    def _connection_closed(self, error):
+        if self.finish_future.done():
+            return
+        if self.conn.is_client:
+            # The client delegate learns about this through read_response.
+            self.finish_future.set_exception(StreamClosedError(real_error=error))
+        else:
+            self._notify_close()
 
     def handle_frame(self, frame):
         if frame.type == constants.FrameType.PRIORITY:
@@ -104,7 +185,7 @@ class Stream(object):
             if self.conn.is_client:
                 # TODO: Need tests for client side of headers-too-large.
                 # What's the best way to send an error?
-                self.delegate.on_connection_close()
+                self._call_delegate('on_connection_close')
             else:
                 # write_headers needs a start line so it can tell
                 # whether this is a HEAD or not. If we're rejecting
@@ -158,7 +239,7 @@ class Stream(object):
                     if k == b":authority":
                         headers.add("Host", native_str(v))
                 else:
-                    headers.add(native_str(k),  native_str(v))
+                    headers.add(native_str(k), v.decode('latin1'))
                     has_regular_header = True
         except HpackError:
             raise ConnectionError(constants.ErrorCode.COMPRESSION_ERROR)
@@ -196,13 +277,16 @@ class Stream(object):
              start_line.code == 304)):
             self._incoming_content_remaining = 0
         elif "content-length" in headers:
-            self._incoming_content_remaining = int(headers["content-length"])
+            try:
+                self._incoming_content_remaining = parse_int(headers["content-length"])
+            except ValueError:
+                raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
 
         if not self.conn.is_client or status >= 200:
             self._phase = constants.HTTPPhase.BODY
 
         self._delegate_started = True
-        self.delegate.headers_received(start_line, headers)
+        self._call_delegate('headers_received', start_line, headers)
 
     def _handle_data_frame(self, frame):
         if self._header_frames:
@@ -218,7 +302,7 @@ class Stream(object):
             if self._incoming_content_remaining < 0:
                 raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
         if frame.data and self._delegate_started:
-            future = self.delegate.data_received(frame.data)
+            future = self._call_delegate('data_received', frame.data)
             if future is None:
                 self._send_window_update(len(frame.data))
             else:
@@ -240,7 +324,7 @@ class Stream(object):
                 raise StreamError(self.stream_id, constants.ErrorCode.PROTOCOL_ERROR)
             if self._delegate_started:
                 self._delegate_started = False
-                self.delegate.finish()
+                self._call_delegate('finish')
             self.finish_future.set_result(None)
             return True
         return False
@@ -255,8 +339,7 @@ class Stream(object):
         if len(frame.data) != 4:
             raise ConnectionError(constants.ErrorCode.FRAME_SIZE_ERROR)
         # TODO: expose error code?
-        if self._delegate_started:
-            self.delegate.on_connection_close()
+        self._notify_close()
 
     def _handle_window_update_frame(self, frame):
         self.window.apply_window_update(frame)
@@ -270,13 +353,13 @@ class Stream(object):
                                      0, self.stream_id, b'\x00\x00\x00\x00'))
 
     @_reset_on_error
-    def write_headers(self, start_line, headers, chunk=None, callback=None):
+    def write_headers(self, start_line, headers, chunk=None):
         if (not self.conn.is_client and
             (self._request_start_line.method == 'HEAD' or
              start_line.code == 304)):
             self._outgoing_content_remaining = 0
         elif 'Content-Length' in headers:
-            self._outgoing_content_remaining = int(headers['Content-Length'])
+            self._outgoing_content_remaining = parse_int(headers['Content-Length'])
         header_list = []
         if self.conn.is_client:
             self._request_start_line = start_line
@@ -291,47 +374,54 @@ class Stream(object):
                                 constants.HeaderIndexMode.YES))
         for k, v in headers.get_all():
             k = utf8(k.lower())
+            # Like HTTP1Connection, encode header values as latin1.
+            if not isinstance(v, bytes):
+                v = v.encode('latin1')
+            if _FORBIDDEN_HEADER_CHARS_RE.search(k + v):
+                raise ValueError("Illegal characters in header: %r: %r" % (k, v))
             if k == b"connection":
                 # Remove the implicit "connection: close", which is not
                 # allowed in http2.
                 # TODO: move the responsibility for this from httpclient
                 # to http1connection?
                 continue
-            header_list.append((k, utf8(v),
+            header_list.append((k, v,
                                 constants.HeaderIndexMode.YES))
+        self._headers_written = True
         data = bytes(self.conn.hpack_encoder.encode(header_list))
         frame = Frame(constants.FrameType.HEADERS,
                       constants.FrameFlag.END_HEADERS, self.stream_id,
                       data)
         self.conn._write_frame(frame)
 
-        return self.write(chunk, callback)
+        return self.write(chunk)
 
     @_reset_on_error
-    def write(self, chunk, callback=None):
+    def write(self, chunk):
         if chunk:
             if self._outgoing_content_remaining is not None:
                 self._outgoing_content_remaining -= len(chunk)
                 if self._outgoing_content_remaining < 0:
                     raise HTTPOutputError(
                         "Tried to write more data than Content-Length")
-        return self._write_chunk(chunk, callback)
+        return self._write_chunk(chunk)
 
     @gen.coroutine
-    def _write_chunk(self, chunk, callback=None):
+    def _write_chunk(self, chunk):
         try:
             if chunk:
                 yield self.write_lock.acquire()
                 while chunk:
-                    allowance = yield self.window.consume(len(chunk))
+                    max_frame_size = self.conn.setting(
+                        constants.Setting.MAX_FRAME_SIZE)
+                    allowance = yield self.window.consume(
+                        min(len(chunk), max_frame_size))
 
                     yield self.conn._write_frame(
                         Frame(constants.FrameType.DATA, 0,
                               self.stream_id, chunk[:allowance]))
                     chunk = chunk[allowance:]
                 self.write_lock.release()
-            if callback is not None:
-                callback()
         except Exception:
             self.reset()
             raise

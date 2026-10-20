@@ -1,8 +1,17 @@
-tornado==4.3
-tox==2.1.1
+tornado==6.5.10
+tox==4.65.0
 
 # Indirect dependencies.
-pluggy==0.3.1
-py==1.10.0
-virtualenv==13.1.2
-wheel==0.38.1
+cachetools==7.2.4
+colorama==0.4.6
+distlib==0.4.4
+filelock==4.1.0
+packaging==26.3
+platformdirs==4.12.4
+pluggy==1.7.0
+pyproject-api==1.11.4
+python-discovery==1.6.4
+tomli==2.5.0
+tomli-w==1.2.0
+typing-extensions==4.16.0
+virtualenv==21.14.11
