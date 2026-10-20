@@ -10,14 +10,14 @@ class Frame(collections.namedtuple(
     def without_padding(self):
         """Returns a new Frame, equal to this one with any padding removed."""
         if self.flags & constants.FrameFlag.PADDED:
-            pad_len, = struct.unpack('>b', self.data[:1])
-            if pad_len > (len(self.data)-1):
-                if self.type == constants.FrameType.HEADERS:
-                    raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
-                                          "invalid padding length")
-                raise StreamError(self.stream_id,
-                                  constants.ErrorCode.PROTOCOL_ERROR)
-            data = self.data[1:-pad_len]
+            if not self.data:
+                raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                      "missing padding length")
+            pad_len = self.data[0]
+            if pad_len >= len(self.data):
+                raise ConnectionError(constants.ErrorCode.PROTOCOL_ERROR,
+                                      "invalid padding length")
+            data = self.data[1:len(self.data) - pad_len]
             return Frame(self.type, self.flags, self.stream_id, data)
         return self
 

@@ -19,6 +19,9 @@ class HpackDecoder(object):
         self._dynamic_table = collections.deque()
         self._dynamic_table_size = 0
         self._dynamic_table_limit = dynamic_table_limit
+        # The largest limit the peer may choose, i.e. the value of
+        # SETTINGS_HEADER_TABLE_SIZE that we have advertised.
+        self._max_dynamic_table_limit = dynamic_table_limit
 
     def decode(self, data):
         try:
@@ -50,7 +53,9 @@ class HpackDecoder(object):
                                 raise HpackError("dynamic table change must "
                                                  "be at start of block")
                             new_limit = bit_decoder.read_hpack_int()
-                            # TODO: fail if new_limit is higher than old limit.
+                            if new_limit > self._max_dynamic_table_limit:
+                                raise HpackError("dynamic table size update "
+                                                 "exceeds the maximum")
                             self._dynamic_table_limit = new_limit
                             self._gc_dynamic_table()
                         else:
@@ -197,7 +202,7 @@ def _load_static_table():
             if int(fields[0]) != len(table):
                 raise ValueError("inconsistent numbering in static table")
             name = utf8(fields[1].strip())
-            value = utf8(fields[2].strip()) if len(fields) > 2 else None
+            value = utf8(fields[2].strip()) if len(fields) > 2 else b''
             table.append((name, value))
     static_keys = {}
     static_pairs = {}
