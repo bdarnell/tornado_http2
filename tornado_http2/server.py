@@ -177,9 +177,12 @@ class _UpgradingConnection(HTTPConnection):
         h2_conn = Connection(stream, False, params=self.http2_params,
                              context=self.context)
         self.server._connections.add(h2_conn)
-        h2_conn.start(self.server)
+        # Register stream 1 before starting the connection: start() may
+        # process already-buffered frames (such as a WINDOW_UPDATE for
+        # stream 1) synchronously.
         self.conn = Stream(h2_conn, 1, None, context=self.context)
         h2_conn.streams[1] = self.conn
+        h2_conn.start(self.server)
         self.conn._request_start_line = RequestStartLine(
             self._request_start_line.method,
             self._request_start_line.path,
