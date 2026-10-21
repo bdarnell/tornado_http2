@@ -58,6 +58,10 @@ class Connection(object):
             pass
 
     def start(self, delegate):
+        # Frames are written as soon as they are ready, so Nagle's
+        # algorithm only adds latency (interacting with delayed ACKs, it
+        # stalls each small response by ~40ms).
+        self.stream.set_nodelay(True)
         self._serving_future = self._conn_loop(delegate)
         IOLoop.current().add_future(self._serving_future, lambda f: f.result())
         return self._serving_future
