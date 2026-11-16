@@ -1,10 +1,12 @@
+import functools
 import ssl
 
 from tornado.httpclient import AsyncHTTPClient, main
 from tornado.ioloop import IOLoop
 from tornado.iostream import SSLIOStream
+from tornado import netutil
 from tornado.netutil import ssl_options_to_context
-from tornado.simple_httpclient import SimpleAsyncHTTPClient, _HTTPConnection, _client_ssl_defaults
+from tornado.simple_httpclient import SimpleAsyncHTTPClient, _HTTPConnection
 
 from tornado_http2.connection import Connection, Params
 from tornado_http2 import constants
@@ -28,15 +30,41 @@ class Client(SimpleAsyncHTTPClient):
         return False
 
 
+def _shared_contexts():
+    # Contexts that Tornado caches and shares between requests (and
+    # with other clients), so we must not modify them.
+    shared = []
+    for name in ('_client_ssl_defaults', '_client_ssl_noverify'):
+        ctx = getattr(netutil, name, None)
+        if callable(ctx):
+            # Tornado 6.6+ creates these lazily (and adds
+            # _client_ssl_noverify); 6.5 has a module-level context.
+            ctx = ctx()
+        if ctx is not None:
+            shared.append(ctx)
+    return shared
+
+
+@functools.lru_cache(maxsize=8)
+def _alpn_context(base):
+    ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+    ctx.check_hostname = base.check_hostname
+    ctx.verify_mode = base.verify_mode
+    ctx.options = base.options
+    ctx.set_alpn_protocols([constants.HTTP2_TLS])
+    return ctx
+
+
 class _HTTP2ClientConnection(_HTTPConnection):
     def _get_ssl_options(self, scheme):
         options = super(_HTTP2ClientConnection, self)._get_ssl_options(scheme)
         if options is not None:
             if isinstance(options, dict):
                 options = ssl_options_to_context(options, server_side=False)
-            elif options is _client_ssl_defaults:
-                # Don't modify the shared default context.
-                options = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+            elif any(options is ctx for ctx in _shared_contexts()):
+                # Don't modify Tornado's shared contexts; use an
+                # ALPN-enabled copy instead.
+                options = _alpn_context(options)
             options.set_alpn_protocols([constants.HTTP2_TLS])
         return options
 
