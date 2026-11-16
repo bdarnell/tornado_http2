@@ -4,13 +4,20 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      tornado_dep:
+        description: >-
+          Tornado requirement to test against, for example
+          "tornado @ git+https://github.com/tornadoweb/tornado.git@master".
+          Leave empty to use the version pinned in maint/requirements.txt.
+        required: false
+        default: ""
 
 env:
-  # Tornado's test suite only works over HTTP/2 as of changes that are
-  # not yet in a release. Switch this to Tornado 6.7 (or remove it to
-  # use the default from tox.ini) once 6.7 is released.
-  TORNADO_DEP: "tornado @ git+https://github.com/tornadoweb/tornado.git@master"
   PYTHON_VERSION: "3.15"
+  # Passed through the environment rather than interpolated into scripts.
+  TORNADO_DEP_INPUT: ${{ inputs.tornado_dep }}
 
 jobs:
   test:
@@ -26,10 +33,26 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install tox
         run: python -m pip install -r maint/requirements.txt
+      - name: Select Tornado version
+        run: |
+          if [ -n "$TORNADO_DEP_INPUT" ]; then
+            echo "TORNADO_DEP=$TORNADO_DEP_INPUT" >> "$GITHUB_ENV"
+          else
+            echo "TORNADO_DEP=$(grep -E '^tornado==' maint/requirements.txt)" >> "$GITHUB_ENV"
+          fi
       - name: Run tests
         run: |
           py=py$(echo "$PYTHON_VERSION" | tr -d .)
-          tox -e "$py-${{ matrix.client }}-http2,$py-${{ matrix.client }}-tornado"
+          envs="$py-${{ matrix.client }}-http2"
+          # Tornado's own test suite only passes over HTTP/2 with changes
+          # that are not yet in a release (expected in Tornado 6.7), so run
+          # it only when testing against an explicitly chosen Tornado
+          # (normally master). Run it unconditionally once 6.7 is pinned.
+          if [ -n "$TORNADO_DEP_INPUT" ]; then
+            envs="$envs,$py-${{ matrix.client }}-tornado"
+          fi
+          echo "Testing with $TORNADO_DEP"
+          tox -e "$envs"
 
   h2spec:
     runs-on: ubuntu-latest
@@ -40,6 +63,13 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install tox
         run: python -m pip install -r maint/requirements.txt
+      - name: Select Tornado version
+        run: |
+          if [ -n "$TORNADO_DEP_INPUT" ]; then
+            echo "TORNADO_DEP=$TORNADO_DEP_INPUT" >> "$GITHUB_ENV"
+          else
+            echo "TORNADO_DEP=$(grep -E '^tornado==' maint/requirements.txt)" >> "$GITHUB_ENV"
+          fi
       - name: Install h2spec
         run: |
           mkdir -p "$RUNNER_TEMP/h2spec"
@@ -49,4 +79,5 @@ jobs:
       - name: Run h2spec
         run: |
           py=py$(echo "$PYTHON_VERSION" | tr -d .)
+          echo "Testing with $TORNADO_DEP"
           tox -e "$py-h2spec"
