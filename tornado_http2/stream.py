@@ -311,7 +311,26 @@ class Stream(object):
             self._phase = constants.HTTPPhase.BODY
 
         self._delegate_started = True
-        self._call_delegate('headers_received', start_line, headers)
+        future = self._call_delegate('headers_received', start_line, headers)
+        if (not self.conn.is_client and
+                headers.get('Expect', '').lower() == '100-continue'):
+            # Like HTTP1Connection, send 100 Continue unless the
+            # delegate has already started a response.
+            def send_continue(f=None):
+                if not self._headers_written and not self._aborted:
+                    data = bytes(self.conn.hpack_encoder.encode(
+                        [(b':status', b'100', constants.HeaderIndexMode.YES)]))
+                    try:
+                        self.conn._write_frame(Frame(
+                            constants.FrameType.HEADERS,
+                            constants.FrameFlag.END_HEADERS,
+                            self.stream_id, data))
+                    except StreamClosedError:
+                        pass
+            if future is None:
+                send_continue()
+            else:
+                future.add_done_callback(send_continue)
 
     def _handle_data_frame(self, frame):
         if self._header_frames:
