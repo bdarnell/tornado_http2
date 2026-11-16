@@ -218,7 +218,12 @@ class _UpgradingRequestAdapter(HTTPMessageDelegate):
         self.delegate = delegate
 
     def headers_received(self, start_line, headers):
-        if 'Upgrade' in headers:
+        # Don't upgrade a request that expects 100-continue: while
+        # upgrading we buffer the response, so an early (e.g. 403) response
+        # would not be seen by HTTP1Connection, which would send 100
+        # Continue and read the body anyway.
+        if ('Upgrade' in headers and
+                headers.get('Expect', '').lower() != '100-continue'):
             upgrades = set(i.strip() for i in headers['Upgrade'].split(','))
             if constants.HTTP2_CLEAR in upgrades:
                 self.connection.upgrading = True
